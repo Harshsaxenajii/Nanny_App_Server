@@ -1,0 +1,333 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("MONGO_URI")
+}
+
+enum UserRole {
+  USER
+  NANNY
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum NannyStatus {
+  PENDING_VERIFICATION
+  TRAINING_ASSIGNED
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum BookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  NANNY_ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED_BY_USER
+  CANCELLED_BY_NANNY
+  CANCELLED_BY_ADMIN
+}
+
+enum ServiceType {
+  FULL_TIME
+  PART_TIME
+  BABYSITTING
+  OVERNIGHT
+  SPECIAL_NEEDS
+}
+
+enum NotificationType {
+  BOOKING_CONFIRMED
+  BOOKING_CANCELLED
+  BOOKING_COMPLETED
+  NANNY_VERIFIED
+  NANNY_REJECTED
+  PAYMENT_SUCCESS
+  PAYMENT_FAILED
+  GENERAL
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  DOCUMENT
+}
+
+model User {
+  id                           String    @id @default(auto()) @map("_id") @db.ObjectId
+  mobile                       String    @unique
+  countryCode                  String    @default("+91")
+  name                         String    @default("")
+  email                        String?
+  gender                       Gender?
+  dateOfBirth                  DateTime?
+  profilePhoto                 String?
+  isMobileVerified             Boolean   @default(false)
+  role                         UserRole  @default(USER)
+  fcmToken                     String?
+  platform                     String?
+  lastLoginAt                  DateTime?
+  preferredNannyGender         Gender?
+  languagesSpoken              String[]
+  notificationsSms             Boolean   @default(true)
+  notificationsPush            Boolean   @default(true)
+  emergencyContactName         String?
+  emergencyContactMobile       String?
+  emergencyContactRelationship String?
+  createdAt                    DateTime  @default(now())
+  updatedAt                    DateTime  @updatedAt
+
+  otpRecord       OtpRecord?
+  refreshTokens   RefreshToken[]
+  addresses       Address[]
+  nannyProfile    Nanny?
+  bookings        Booking[]        @relation("UserBookings")
+  notifications   Notification[]
+  auditLogs       AuditLog[]
+  chatParticipants ChatParticipant[]
+  sentMessages    ChatMessage[]
+
+  @@map("users")
+}
+
+model OtpRecord {
+  id           String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId       String    @unique @db.ObjectId
+  mobile       String
+  countryCode  String
+  otp          String
+  attempts     Int       @default(0)
+  expiresAt    DateTime
+  blockedUntil DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("otp_records")
+}
+
+model RefreshToken {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+model Address {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId       String   @db.ObjectId
+  label        String
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  state        String
+  pincode      String
+  country      String   @default("IN")
+  isDefault    Boolean  @default(false)
+  lat          Float?
+  lng          Float?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("addresses")
+}
+
+model Nanny {
+  id                  String      @id @default(auto()) @map("_id") @db.ObjectId
+  userId              String      @unique @db.ObjectId
+  name                String
+  mobile              String
+  email               String?
+  gender              Gender?
+  dateOfBirth         DateTime?
+  profilePhoto        String?
+  status              NannyStatus @default(PENDING_VERIFICATION)
+  isActive            Boolean     @default(false)
+  isAvailable         Boolean     @default(false)
+  isTrainingCompleted Boolean     @default(false)
+  experience          Int         @default(0)
+  bio                 String?
+  languages           String[]
+  serviceTypes        String[]
+  specializations     String[]
+  ageGroupsHandled    String[]
+  hourlyRate          Float       @default(0)
+  dailyRate           Float?
+  serviceRadius       Int?
+  workingAreas        String[]
+  rating              Float       @default(0)
+  totalReviews        Int         @default(0)
+  totalBookings       Int         @default(0)
+  documents           Json        @default("[]")
+  verifiedAt          DateTime?
+  verifiedBy          String?
+  rejectionReason     String?
+  adminNotes          String?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings Booking[] @relation("NannyBookings")
+
+  @@map("nannies")
+}
+
+model Booking {
+  id                  String        @id @default(auto()) @map("_id") @db.ObjectId
+  userId              String        @db.ObjectId
+  nannyId             String?       @db.ObjectId
+  status              BookingStatus @default(PENDING_PAYMENT)
+  serviceType         ServiceType
+  scheduledStartTime  DateTime
+  scheduledEndTime    DateTime
+  actualStartTime     DateTime?
+  actualEndTime       DateTime?
+  specialInstructions String?
+  children            Json
+  addressLabel        String?
+  addressLine1        String
+  addressLine2        String?
+  addressCity         String
+  addressState        String
+  addressPincode      String
+  addressCountry      String        @default("IN")
+  addressLat          Float?
+  addressLng          Float?
+  baseAmount          Float
+  gstAmount           Float
+  totalAmount         Float
+  razorpayOrderId     String?
+  paymentId           String?
+  cancellationReason  String?
+  cancelledBy         String?
+  timeline            Json          @default("[]")
+  reviewRating        Int?
+  reviewComment       String?
+  reviewedAt          DateTime?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  user     User     @relation("UserBookings", fields: [userId], references: [id])
+  nanny    Nanny?   @relation("NannyBookings", fields: [nannyId], references: [id])
+  payment  Payment?
+  chatRoom ChatRoom?
+
+  @@map("bookings")
+}
+
+model Payment {
+  id                String    @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId         String    @unique @db.ObjectId
+  userId            String    @db.ObjectId
+  razorpayOrderId   String?   @unique
+  razorpayPaymentId String?
+  amount            Float
+  currency          String    @default("INR")
+  status            String    @default("PENDING")
+  refundId          String?
+  refundAmount      Float?
+  refundReason      String?
+  refundedAt        DateTime?
+  capturedAt        DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@map("payments")
+}
+
+model ChatRoom {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId String   @unique @db.ObjectId
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  booking      Booking          @relation(fields: [bookingId], references: [id])
+  participants ChatParticipant[]
+  messages     ChatMessage[]
+
+  @@map("chat_rooms")
+}
+
+model ChatParticipant {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  roomId      String    @db.ObjectId
+  userId      String    @db.ObjectId
+  unreadCount Int       @default(0)
+  lastReadAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  room ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User     @relation(fields: [userId], references: [id])
+
+  @@unique([roomId, userId])
+  @@map("chat_participants")
+}
+
+model ChatMessage {
+  id        String      @id @default(auto()) @map("_id") @db.ObjectId
+  roomId    String      @db.ObjectId
+  senderId  String      @db.ObjectId
+  content   String
+  type      MessageType @default(TEXT)
+  mediaUrl  String?
+  isRead    Boolean     @default(false)
+  createdAt DateTime    @default(now())
+
+  room   ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  sender User     @relation(fields: [senderId], references: [id])
+
+  @@map("chat_messages")
+}
+
+model Notification {
+  id        String           @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String           @db.ObjectId
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
+
+model AuditLog {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  actorId      String   @db.ObjectId
+  actorRole    String
+  action       String
+  resource     String
+  resourceId   String
+  previousData Json?
+  newData      Json?
+  createdAt    DateTime @default(now())
+
+  actor User @relation(fields: [actorId], references: [id])
+
+  @@map("audit_logs")
+}
