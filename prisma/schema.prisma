@@ -20,6 +20,12 @@ enum Gender {
   OTHER
 }
 
+enum BabyGender {
+  BOY
+  GIRL
+  OTHER
+}
+
 enum NannyStatus {
   PENDING_VERIFICATION
   TRAINING_ASSIGNED
@@ -65,38 +71,38 @@ enum MessageType {
 }
 
 model User {
-  id                           String    @id @default(auto()) @map("_id") @db.ObjectId
-  mobile                       String    @unique
-  countryCode                  String    @default("+91")
-  name                         String    @default("")
+  id                           String            @id @default(auto()) @map("_id") @db.ObjectId
+  mobile                       String            @unique
+  countryCode                  String            @default("+91")
+  name                         String            @default("")
   email                        String?
   gender                       Gender?
   dateOfBirth                  DateTime?
   profilePhoto                 String?
-  isMobileVerified             Boolean   @default(false)
-  role                         UserRole  @default(USER)
+  isMobileVerified             Boolean           @default(false)
+  role                         UserRole          @default(USER)
   fcmToken                     String?
   platform                     String?
   lastLoginAt                  DateTime?
   preferredNannyGender         Gender?
   languagesSpoken              String[]
-  notificationsSms             Boolean   @default(true)
-  notificationsPush            Boolean   @default(true)
+  notificationsSms             Boolean           @default(true)
+  notificationsPush            Boolean           @default(true)
   emergencyContactName         String?
   emergencyContactMobile       String?
   emergencyContactRelationship String?
-  createdAt                    DateTime  @default(now())
-  updatedAt                    DateTime  @updatedAt
-
-  otpRecord       OtpRecord?
-  refreshTokens   RefreshToken[]
-  addresses       Address[]
-  nannyProfile    Nanny?
-  bookings        Booking[]        @relation("UserBookings")
-  notifications   Notification[]
-  auditLogs       AuditLog[]
-  chatParticipants ChatParticipant[]
-  sentMessages    ChatMessage[]
+  createdAt                    DateTime          @default(now())
+  updatedAt                    DateTime          @updatedAt
+  childrens                    Children[]
+  otpRecord                    OtpRecord?
+  refreshTokens                RefreshToken[]
+  addresses                    Address[]
+  nannyProfile                 Nanny?
+  bookings                     Booking[]         @relation("UserBookings")
+  notifications                Notification[]
+  auditLogs                    AuditLog[]
+  chatParticipants             ChatParticipant[]
+  sentMessages                 ChatMessage[]
 
   @@map("users")
 }
@@ -191,6 +197,19 @@ model Nanny {
   @@map("nannies")
 }
 
+model Children {
+  id        String     @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  birthDate DateTime
+  age       Int?
+  gender    BabyGender
+  userId    String     @db.ObjectId // ✅ remove the ? — make it required
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings  Booking[]
+
+  @@map("childrens") // ✅ explicit collection name
+}
+
 model Booking {
   id                  String        @id @default(auto()) @map("_id") @db.ObjectId
   userId              String        @db.ObjectId
@@ -202,7 +221,7 @@ model Booking {
   actualStartTime     DateTime?
   actualEndTime       DateTime?
   specialInstructions String?
-  children            Json
+  children            Children      @relation(fields: [childrenId], references: [id])
   addressLabel        String?
   addressLine1        String
   addressLine2        String?
@@ -219,6 +238,7 @@ model Booking {
   paymentId           String?
   cancellationReason  String?
   cancelledBy         String?
+  requestedTasks      Json?         @default("[]")
   timeline            Json          @default("[]")
   reviewRating        Int?
   reviewComment       String?
@@ -226,10 +246,11 @@ model Booking {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
-  user     User     @relation("UserBookings", fields: [userId], references: [id])
-  nanny    Nanny?   @relation("NannyBookings", fields: [nannyId], references: [id])
-  payment  Payment?
-  chatRoom ChatRoom?
+  user       User      @relation("UserBookings", fields: [userId], references: [id])
+  nanny      Nanny?    @relation("NannyBookings", fields: [nannyId], references: [id])
+  payment    Payment?
+  chatRoom   ChatRoom?
+  childrenId String    @db.ObjectId
 
   @@map("bookings")
 }
@@ -263,7 +284,7 @@ model ChatRoom {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  booking      Booking          @relation(fields: [bookingId], references: [id])
+  booking      Booking           @relation(fields: [bookingId], references: [id])
   participants ChatParticipant[]
   messages     ChatMessage[]
 

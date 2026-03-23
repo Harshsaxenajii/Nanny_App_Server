@@ -34,61 +34,63 @@ const CANCELLED_STATUSES = [
 export class BookingService {
   /* ── POST /api/v1/bookings ──────────────────────────────────────────── */
   async createBooking(userId: string, body: any) {
-    // Edge case: user must exist
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new AppError("User not found", 404);
 
     const start = new Date(body.scheduledStartTime);
     const end = new Date(body.scheduledEndTime);
 
-    // Edge case: end must be after start
     if (end <= start)
       throw new AppError(
         "scheduledEndTime must be after scheduledStartTime",
         400,
       );
-
-    // Edge case: start must be in the future
     if (start <= new Date())
       throw new AppError("scheduledStartTime must be in the future", 400);
+
+    // ✅ Verify child exists and belongs to this user
+    const child = await prisma.children.findUnique({
+      where: { id: body.childrenId },
+    });
+    if (!child) throw new AppError("Child not found", 404);
+    if (child.userId !== userId)
+      throw new AppError("This child does not belong to your account", 403);
 
     let nannyId: string | null = null;
     let pricing = { baseAmount: 0, gstAmount: 0, totalAmount: 0, hours: 0 };
 
     if (body.nannyId) {
-      // Edge case: nanny must exist and be verified + available
       const nanny = await prisma.nanny.findUnique({
         where: { id: body.nannyId },
       });
       if (!nanny) throw new AppError("The specified nanny was not found", 404);
-      if (nanny.status !== NannyStatus.VERIFIED) {
+      if (nanny.status !== NannyStatus.VERIFIED)
         throw new AppError(
           "This nanny is not currently verified and cannot accept bookings",
           400,
         );
-      }
       if (!nanny.isAvailable)
         throw new AppError("This nanny is currently not available", 400);
       if (!nanny.isActive)
         throw new AppError("This nanny account is not active", 400);
-
-      // Edge case: nanny must support requested service type
-      if (!nanny.serviceTypes.includes(body.serviceType)) {
+      if (!nanny.serviceTypes.includes(body.serviceType))
         throw new AppError(
           `This nanny does not offer ${body.serviceType}. Available: ${nanny.serviceTypes.join(", ")}`,
           400,
         );
-      }
 
       nannyId = nanny.id;
       pricing = calcPricing(nanny.hourlyRate, start, end);
     } else {
-      // No nanny specified — price with a default rate (₹200/hr)
       pricing = calcPricing(200, start, end);
     }
 
     const addr = body.address;
     const coords = addr.coordinates?.coordinates;
+
+    const requestedTasks = Array.isArray(body.requestedTasks)
+      ? body.requestedTasks
+      : [];
 
     const booking = await prisma.booking.create({
       data: {
@@ -98,7 +100,8 @@ export class BookingService {
         scheduledStartTime: start,
         scheduledEndTime: end,
         specialInstructions: body.specialInstructions ?? null,
-        children: body.children as any,
+        childrenId: body.childrenId,
+        requestedTasks,
         addressLabel: addr.label ?? null,
         addressLine1: addr.addressLine1,
         addressLine2: addr.addressLine2 ?? null,
@@ -117,6 +120,9 @@ export class BookingService {
           BookingStatus.PENDING_PAYMENT,
           "Booking created, awaiting payment",
         ) as any,
+      },
+      include: {
+        children: true, // ✅ return child details in response
       },
     });
 
@@ -249,7 +255,7 @@ export class BookingService {
     role: string,
     reason: string,
   ) {
-    const booking = await prisma.booking.findUnique({
+    const booking: any = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
     if (!booking) throw new AppError("Booking not found", 404);
@@ -563,7 +569,7 @@ export class BookingService {
 
   /* ── Admin: POST /api/v1/admin/bookings/:id/cancel ───────────────────── */
   async adminCancelBooking(bookingId: string, adminId: string, reason: string) {
-    const booking = await prisma.booking.findUnique({
+    const booking: any = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
     if (!booking) throw new AppError("Booking not found", 404);
