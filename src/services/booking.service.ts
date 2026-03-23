@@ -89,9 +89,12 @@ export class BookingService {
     const coords = addr.coordinates?.coordinates;
 
     const requestedTasks = Array.isArray(body.requestedTasks)
-      ? body.requestedTasks
+      ? body.requestedTasks.map((task: string) => ({
+          task,
+          isDone: false,
+          doneAt: null,
+        }))
       : [];
-
     const booking = await prisma.booking.create({
       data: {
         userId,
@@ -138,6 +141,52 @@ export class BookingService {
         totalAmount: pricing.totalAmount,
       },
     };
+  }
+  /* ── POST /api/v1/bookings/markTaskDone ───────────────────────────────────────────── */
+  async markTaskDone(nannyUserId: string, bookingId: string, taskName: string) {
+    // 1. Find the nanny profile
+    const nanny = await prisma.nanny.findUnique({
+      where: { userId: nannyUserId },
+    });
+    if (!nanny) throw new AppError("Nanny profile not found", 404);
+
+    // 2. Find the booking
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
+    if (!booking) throw new AppError("Booking not found", 404);
+
+    // 3. Verify this nanny owns this booking
+    if (booking.nannyId !== nanny.id)
+      throw new AppError("You are not assigned to this booking", 403);
+
+    // 4. Booking must be in progress
+    if (booking.status !== BookingStatus.IN_PROGRESS)
+      throw new AppError(
+        "Tasks can only be marked done when booking is in progress",
+        400,
+      );
+
+    // 5. Update the specific task in the array
+    const tasks = (booking.requestedTasks as any[]) ?? [];
+    const taskIndex = tasks.findIndex((t) => t.task === taskName);
+
+    if (taskIndex === -1)
+      throw new AppError(`Task "${taskName}" not found in this booking`, 404);
+    if (tasks[taskIndex].isDone)
+      throw new AppError(`Task "${taskName}" is already marked as done`, 400);
+
+    tasks[taskIndex] = {
+      ...tasks[taskIndex],
+      isDone: true,
+      doneAt: new Date().toISOString(),
+    };
+
+    // 6. Save back
+    return prisma.booking.update({
+      where: { id: bookingId },
+      data: { requestedTasks: tasks },
+    });
   }
 
   /* ── GET /api/v1/bookings ───────────────────────────────────────────── */

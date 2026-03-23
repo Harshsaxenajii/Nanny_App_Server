@@ -17,6 +17,22 @@ router.post('/', roles('USER'), validate(S.createBooking), async (req: Request, 
   } catch (e) { next(e); }
 });
 
+// PATCH /api/v1/bookings/:bookingId/tasks/:taskName/done
+router.patch(
+  '/:bookingId/tasks/:taskName/done',
+  roles('NANNY'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await service.markTaskDone(
+        req.user!.userId,
+        req.params.bookingId,
+        req.params.taskName,
+      );
+      res.json({ success: true, message: 'Task marked as done', data: result, statusCode: 200 });
+    } catch (e) { next(e); }
+  }
+);
+
 // GET /api/v1/bookings
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try { res.json(ok(await service.getMyBookings(req.user!.userId, req.user!.role, req.query))); } catch (e) { next(e); }
