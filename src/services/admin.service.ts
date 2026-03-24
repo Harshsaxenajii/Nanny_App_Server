@@ -34,6 +34,20 @@ export class AdminService {
     };
   }
 
+   /* ── GET /api/v1/admin/getAllUsers ─────────────────────────────────────── */
+   async getAllUsers(query: any){
+    const { page, limit, skip } = paginate(query);
+    const [users, total] = await Promise.all([
+      prisma.user.findMany({
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.nanny.count(),
+    ]);
+    return paginatedResult(users, total, page, limit);
+   }
+
   /* ── GET /api/v1/admin/nannies/pending ───────────────────────────────── */
   async getPendingNannies(query: any) {
     const { page, limit, skip } = paginate(query);
@@ -47,6 +61,23 @@ export class AdminService {
         include: { user: { select: { id: true, mobile: true, createdAt: true } } },
       }),
       prisma.nanny.count({ where }),
+    ]);
+    return paginatedResult(nannies, total, page, limit);
+  }
+
+    /* ── GET /api/v1/admin/nannies/all ───────────────────────────────── */
+  async getAllNannies(query: any) {
+    const { page, limit, skip } = paginate(query);
+    // const where = { status: NannyStatus.PENDING_VERIFICATION };
+    const [nannies, total] = await Promise.all([
+      prisma.nanny.findMany({
+        // where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'asc' },
+        include: { user: { select: { id: true, mobile: true, createdAt: true } } },
+      }),
+      prisma.nanny.count(),
     ]);
     return paginatedResult(nannies, total, page, limit);
   }

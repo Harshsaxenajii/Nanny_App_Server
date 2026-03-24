@@ -609,10 +609,12 @@ export class BookingService {
           user: { select: { id: true, name: true, mobile: true } },
           nanny: { select: { id: true, name: true, mobile: true } },
           payment: true,
+          children:true
         },
       }),
       prisma.booking.count({ where }),
     ]);
+    console.log(bookings)
     return paginatedResult(bookings, total, page, limit);
   }
 

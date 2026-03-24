@@ -19,9 +19,18 @@ router.get('/dashboard', async (req: Request, res: Response, next: NextFunction)
   try { res.json(ok(await admin.getDashboard())); } catch (e) { next(e); }
 });
 
+router.get('/getAllUsers', async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await admin.getAllUsers(req.query))); } catch (e) { next(e); }
+});
+
 // GET /api/v1/admin/nannies/pending  ← MUST be before /nannies/:id
 router.get('/nannies/pending', async (req: Request, res: Response, next: NextFunction) => {
   try { res.json(ok(await admin.getPendingNannies(req.query))); } catch (e) { next(e); }
+});
+
+// GET /api/v1/admin/nannies/all  ← MUST be before /nannies/all
+router.get('/nannies/getAllNannies', async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await admin.getAllNannies(req.query))); } catch (e) { next(e); }
 });
 
 // GET /api/v1/admin/nannies/:id
