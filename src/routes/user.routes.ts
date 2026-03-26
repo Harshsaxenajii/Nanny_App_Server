@@ -22,7 +22,7 @@ router.patch('/me', validate(S.updateProfile), async (req: Request, res: Respons
 
 // POST 
 router.post("/me/children", validate(S.addChild), async (req: Request, res: Response, next: NextFunction) => {
-  try { res.json(ok(await service.addChild(req.user!.userId, req.body), 'Profile updated')); } catch (e) { next(e); }
+  try { res.json(ok(await service.addChild(req.user!.userId, req.body.children), 'Profile updated')); } catch (e) { next(e); }
 });
 
 // POST /api/v1/users/me/addresses

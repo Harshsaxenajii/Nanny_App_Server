@@ -34,7 +34,7 @@ export class UserService {
       where: { id: userId },
       include: {
         addresses: { orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }] },
-        childrens:true,
+        childrens: true,
       },
     });
     if (!user) throw new AppError("User not found", 404);
@@ -127,33 +127,51 @@ export class UserService {
   async addChild(userId: string, body: any) {
     await findUserOrFail(userId);
 
-    const { name, birthDate, gender } = body;
-
-    // Validate required fields
-    if (!name || !birthDate || !gender) {
-      throw new AppError("name, birthDate and gender are required", 400);
+    // Ensure body is an array
+    if (!Array.isArray(body) || body.length === 0) {
+      throw new AppError("Body must be a non-empty array of children", 400);
     }
 
-    const parsedBirthDate = new Date(birthDate);
+    const childrenData: any[] = [];
 
-    // Validate date
-    if (isNaN(parsedBirthDate.getTime())) {
-      throw new AppError("Invalid birthDate format", 400);
-    }
+    for (const child of body) {
+      const { name, birthDate, gender } = child;
 
-    // Validate birthDate is not in the future
-    if (parsedBirthDate > new Date()) {
-      throw new AppError("birthDate cannot be in the future", 400);
-    }
+      // Validate required fields
+      if (!name || !birthDate || !gender) {
+        throw new AppError(
+          "Each child must have name, birthDate and gender",
+          400,
+        );
+      }
 
-    return prisma.children.create({
-      data: {
+      const parsedBirthDate = new Date(birthDate);
+
+      // Validate date format
+      if (isNaN(parsedBirthDate.getTime())) {
+        throw new AppError(`Invalid birthDate for child: ${name}`, 400);
+      }
+
+      // Validate not future date
+      if (parsedBirthDate > new Date()) {
+        throw new AppError(
+          `birthDate cannot be in the future for child: ${name}`,
+          400,
+        );
+      }
+
+      childrenData.push({
         userId,
         name,
         birthDate: parsedBirthDate,
         gender,
         age: ageInMonths(parsedBirthDate),
-      },
+      });
+    }
+
+    // Bulk insert
+    return prisma.children.createMany({
+      data: childrenData,
     });
   }
 

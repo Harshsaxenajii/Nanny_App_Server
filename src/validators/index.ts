@@ -40,9 +40,16 @@ export const S = {
     }),
   }).min(1),
   addChild: Joi.object({
-    name: Joi.string().min(1).max(100).required(),
-    birthDate: isoDate.required(),
-    gender: Joi.string().valid("BOY", "GIRL", "OTHER").required(),
+    children: Joi.array()
+      .items(
+        Joi.object({
+          name: Joi.string().min(1).max(100).required(),
+          birthDate: isoDate.required(),
+          gender: Joi.string().valid("BOY", "GIRL", "OTHER").required(),
+        }),
+      )
+      .min(1)
+      .required(),
   }),
   addAddress: Joi.object({
     label: Joi.string().required(),
