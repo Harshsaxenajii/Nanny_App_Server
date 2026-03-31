@@ -26,12 +26,12 @@ router.post("/me/children", validate(S.addChild), async (req: Request, res: Resp
 });
 
 // PATCH 
-router.post("/me/children/:childrenId", validate(S.addChild), async (req: Request, res: Response, next: NextFunction) => {
+router.patch("/me/children/:childrenId", validate(S.addChild), async (req: Request, res: Response, next: NextFunction) => {
   try { res.json(ok(await service.updateChild(req.user!.userId, req.params.childrenId, req.body.children), 'Childrens data updated')); } catch (e) { next(e); }
 });
 
 // DELETE 
-router.post("/me/children/:childrenId", validate(S.addChild), async (req: Request, res: Response, next: NextFunction) => {
+router.delete("/me/children/:childrenId", validate(S.addChild), async (req: Request, res: Response, next: NextFunction) => {
   try { res.json(ok(await service.deleteChild(req.user!.userId, req.params.childrenId), 'Childrens data deleted')); } catch (e) { next(e); }
 });
 
