@@ -175,6 +175,69 @@ export class UserService {
     });
   }
 
+  // --- UPDATE CHILD ---
+  async updateChild(userId: string, childId: string, body: any) {
+    await findUserOrFail(userId);
+
+    // Verify the child exists and belongs to the user
+    const existingChild = await prisma.children.findUnique({
+      where: { id: childId },
+    });
+
+    if (!existingChild || existingChild.userId !== userId) {
+      throw new AppError("Child not found or unauthorized", 404);
+    }
+
+    const { name, birthDate, gender } = body;
+    const updateData: any = {};
+
+    if (name) updateData.name = name;
+    if (gender) updateData.gender = gender;
+
+    if (birthDate) {
+      const parsedBirthDate = new Date(birthDate);
+
+      // Validate date format
+      if (isNaN(parsedBirthDate.getTime())) {
+        throw new AppError("Invalid birthDate format", 400);
+      }
+
+      // Validate not future date
+      if (parsedBirthDate > new Date()) {
+        throw new AppError("birthDate cannot be in the future", 400);
+      }
+
+      updateData.birthDate = parsedBirthDate;
+      // Note: Omitted the previous age-in-months calculation here
+      // so you can use the exact age calculation from the DOB directly.
+    }
+
+    // Execute the update
+    return prisma.children.update({
+      where: { id: childId },
+      data: updateData,
+    });
+  }
+
+  // --- DELETE CHILD ---
+  async deleteChild(userId: string, childId: string) {
+    await findUserOrFail(userId);
+
+    // Verify the child exists and belongs to the user
+    const existingChild = await prisma.children.findUnique({
+      where: { id: childId },
+    });
+
+    if (!existingChild || existingChild.userId !== userId) {
+      throw new AppError("Child not found or unauthorized", 404);
+    }
+
+    // Execute the deletion
+    return prisma.children.delete({
+      where: { id: childId },
+    });
+  }
+
   /* ── Addresses ─────────────────────────────────────────────────────── */
   async addAddress(userId: string, body: any) {
     // Edge case: user must exist
@@ -300,6 +363,39 @@ export class UserService {
     return prisma.user.update({
       where: { id: userId },
       data: { fcmToken: deviceToken, platform },
+    });
+  }
+
+  async togglePushNotification(userId: string) {
+    const user = await findUserOrFail(userId);
+
+    return prisma.user.update({
+      where: { id: userId },
+      data: {
+        notificationsPush: !user.notificationsPush,
+      },
+    });
+  }
+
+  async toggleSmsNotification(userId: string) {
+    const user = await findUserOrFail(userId);
+
+    return prisma.user.update({
+      where: { id: userId },
+      data: {
+        notificationsSms: !user.notificationsSms,
+      },
+    });
+  }
+
+  async updateUserEmail(userId: string, emailId: string) {
+    await findUserOrFail(userId);
+
+    return prisma.user.update({
+      where: { id: userId },
+      data: {
+        email: emailId,
+      },
     });
   }
 }

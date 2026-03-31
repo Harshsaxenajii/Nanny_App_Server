@@ -25,6 +25,19 @@ router.post("/me/children", validate(S.addChild), async (req: Request, res: Resp
   try { res.json(ok(await service.addChild(req.user!.userId, req.body.children), 'Profile updated')); } catch (e) { next(e); }
 });
 
+// PATCH 
+router.post("/me/children/:childrenId", validate(S.addChild), async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await service.updateChild(req.user!.userId, req.params.childrenId, req.body.children), 'Childrens data updated')); } catch (e) { next(e); }
+});
+
+// DELETE 
+router.post("/me/children/:childrenId", validate(S.addChild), async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await service.deleteChild(req.user!.userId, req.params.childrenId), 'Childrens data deleted')); } catch (e) { next(e); }
+});
+
+
+
+
 // POST /api/v1/users/me/addresses
 router.post('/me/addresses', validate(S.addAddress), async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -65,6 +78,29 @@ router.post('/me/device-token', validate(S.deviceToken), async (req: Request, re
   try {
     await service.registerDeviceToken(req.user!.userId, req.body.deviceToken, req.body.platform);
     res.json(ok(null, 'Device token registered'));
+  } catch (e) { next(e); }
+});
+
+// POST /api/v1/users/me/togglePushNotification
+router.post('/me/togglePushNotification', validate(S.deviceToken), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await service.togglePushNotification(req.user!.userId);
+    res.json(ok(null, 'Push notification status updated successfully!'));
+  } catch (e) { next(e); }
+});
+
+// POST /api/v1/users/me/toggleSmsNotification
+router.post('/me/device-token', validate(S.deviceToken), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await service.toggleSmsNotification(req.user!.userId);
+    res.json(ok(null, 'Sms notificaiton status updated successfully!'));
+  } catch (e) { next(e); }
+});
+
+router.post('/me/updateEmail', validate(S.deviceToken), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await service.updateUserEmail(req.user!.userId, req.body.email);
+    res.json(ok(null, 'Email Updated Successfully!'));
   } catch (e) { next(e); }
 });
 
