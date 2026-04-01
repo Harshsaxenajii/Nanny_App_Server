@@ -220,20 +220,36 @@ export class UserService {
     });
   }
 
-  // --- DELETE CHILD ---
+// --- DELETE CHILD ---
   async deleteChild(userId: string, childId: string) {
     await findUserOrFail(userId);
 
-    // Verify the child exists and belongs to the user
+    // 1. Find the child AND look for any attached bookings
     const existingChild = await prisma.children.findUnique({
       where: { id: childId },
+      include: {
+        // NOTE: Change "bookings" to match the exact relation name in your schema.prisma
+        bookings: {
+          select: { id: true },
+          take: 1, // We only need to find 1 booking to know we must block the deletion
+        },
+      },
     });
 
+    // 2. Standard Auth Check
     if (!existingChild || existingChild.userId !== userId) {
       throw new AppError("Child not found or unauthorized", 404);
     }
 
-    // Execute the deletion
+    // 3. The Booking Check
+    if (existingChild.bookings && existingChild.bookings.length > 0) {
+      throw new AppError(
+        "You have some bookings on this child so you can't delete this.",
+        409 // 409 Conflict is the standard HTTP status for this kind of block
+      );
+    }
+
+    // 4. Execute the deletion safely
     return prisma.children.delete({
       where: { id: childId },
     });
