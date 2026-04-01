@@ -189,6 +189,7 @@ export class UserService {
     }
 
     const { name, birthDate, gender } = body;
+    console.log(name, birthDate, gender)
     const updateData: any = {};
 
     if (name) updateData.name = name;

@@ -51,6 +51,11 @@ export const S = {
       .min(1)
       .required(),
   }),
+  updateChild: Joi.object({
+    name: Joi.string().min(1).max(100).required(),
+    birthDate: isoDate.required(),
+    gender: Joi.string().valid("BOY", "GIRL", "OTHER").required(),
+  }).min(1),
   addAddress: Joi.object({
     label: Joi.string().required(),
     addressLine1: Joi.string().required(),
