@@ -4,6 +4,7 @@ import { AuthService } from '../services/auth.service';
 import { auth, validate } from '../middlewares/index';
 import { S } from '../validators/index';
 import { ok } from '../utils/response';
+import { sendPushToAll } from '../services/pushNotification.service';
 
 const router  = Router();
 const service = new AuthService();
@@ -46,5 +47,13 @@ router.post('/logout', validate(S.logout), async (req: Request, res: Response, n
     res.json(ok(null, 'Logged out successfully'));
   } catch (e) { next(e); }
 });
+
+router.get("/test-notification/:message", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await sendPushToAll("Test Notification", req.params.message);
+    res.json(ok(null, 'Test notification sent!'));
+  } catch (e) { next(e); }
+});
+
 
 export { router as authRouter };

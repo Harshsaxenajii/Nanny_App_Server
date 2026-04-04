@@ -81,16 +81,24 @@ router.post('/me/device-token', validate(S.deviceToken), async (req: Request, re
   } catch (e) { next(e); }
 });
 
+// POST /api/v1/users/me/device-token
+router.delete('/me/remove-token/:deviceToken', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await service.removeDeviceToken(req.user!.userId, req.params.deviceToken);
+    res.json(ok(null, 'Device token removed'));
+  } catch (e) { next(e); }
+});
+
 // POST /api/v1/users/me/togglePushNotification
 router.post('/me/togglePushNotification', validate(S.deviceToken), async (req: Request, res: Response, next: NextFunction) => {
   try {
-    await service.togglePushNotification(req.user!.userId);
+    await service.removeDeviceToken(req.user!.userId, req.body.deviceToken);
     res.json(ok(null, 'Push notification status updated successfully!'));
   } catch (e) { next(e); }
 });
 
 // POST /api/v1/users/me/toggleSmsNotification
-router.post('/me/device-token', validate(S.deviceToken), async (req: Request, res: Response, next: NextFunction) => {
+router.post('/me/toggleSmsNotification', validate(S.deviceToken), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await service.toggleSmsNotification(req.user!.userId);
     res.json(ok(null, 'Sms notificaiton status updated successfully!'));
