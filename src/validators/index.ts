@@ -25,19 +25,24 @@ export const S = {
 
   /* User */
   updateProfile: Joi.object({
-    name: Joi.string().min(2).max(100),
-    email: Joi.string().email(),
-    gender: Joi.string().valid("MALE", "FEMALE", "OTHER"),
-    dateOfBirth: isoDate,
-    profilePhoto: Joi.string().uri(),
+    name: Joi.string().min(2).max(100).allow(null, ""),
+    email: Joi.string().email().allow(null, ""),
+    gender: Joi.string().valid("MALE", "FEMALE", "OTHER").allow(null, ""),
+
+    // Assuming isoDate is a pre-defined Joi rule like Joi.string().isoDate()
+    // We append .allow(null, "") to it so it accepts empty values
+    dateOfBirth: isoDate.allow(null, ""),
+
+    profilePhoto: Joi.string().uri().allow(null, ""),
+
     preferences: Joi.object({
       preferredNannyGender: Joi.string()
         .valid("MALE", "FEMALE", "OTHER")
-        .allow(null),
-      languagesSpoken: Joi.array().items(Joi.string()),
-      notificationsSms: Joi.boolean(),
-      notificationsPush: Joi.boolean(),
-    }),
+        .allow(null, ""),
+      languagesSpoken: Joi.array().items(Joi.string()).allow(null),
+      notificationsSms: Joi.boolean().allow(null),
+      notificationsPush: Joi.boolean().allow(null),
+    }).allow(null),
   }).min(1),
   addChild: Joi.object({
     children: Joi.array()

@@ -1,6 +1,8 @@
+import Expo from "expo-server-sdk";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/AppError";
 import { createLogger } from "../utils/logger";
+import { sendPushToUser } from "./pushNotification.service";
 
 const log = createLogger("user");
 
@@ -35,6 +37,7 @@ export class UserService {
       include: {
         addresses: { orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }] },
         childrens: true,
+        pushTokens: true,
       },
     });
     if (!user) throw new AppError("User not found", 404);
@@ -50,7 +53,7 @@ export class UserService {
       profilePhoto,
       isMobileVerified,
       role,
-      fcmToken,
+      pushTokens,
       platform,
       lastLoginAt,
       childrens,
@@ -77,7 +80,7 @@ export class UserService {
       profilePhoto,
       isMobileVerified,
       role,
-      fcmToken,
+      pushTokens,
       platform,
       lastLoginAt,
       childrens,
@@ -119,6 +122,9 @@ export class UserService {
     }
     if (Object.keys(data).length === 0)
       throw new AppError("No valid fields to update", 400);
+
+    console.log("sending push notification to userId: ", userId);
+    sendPushToUser(userId, "Profile Updated", "Your profile information has been updated successfully.");
 
     return prisma.user.update({ where: { id: userId }, data });
   }
@@ -189,7 +195,7 @@ export class UserService {
     }
 
     const { name, birthDate, gender } = body;
-    console.log(name, birthDate, gender)
+    console.log(name, birthDate, gender);
     const updateData: any = {};
 
     if (name) updateData.name = name;
@@ -220,7 +226,7 @@ export class UserService {
     });
   }
 
-// --- DELETE CHILD ---
+  // --- DELETE CHILD ---
   async deleteChild(userId: string, childId: string) {
     await findUserOrFail(userId);
 
@@ -245,7 +251,7 @@ export class UserService {
     if (existingChild.bookings && existingChild.bookings.length > 0) {
       throw new AppError(
         "You have some bookings on this child so you can't delete this.",
-        409 // 409 Conflict is the standard HTTP status for this kind of block
+        409, // 409 Conflict is the standard HTTP status for this kind of block
       );
     }
 
@@ -377,9 +383,33 @@ export class UserService {
     platform: string,
   ) {
     await findUserOrFail(userId);
-    return prisma.user.update({
+    if (!deviceToken || !Expo.isExpoPushToken(deviceToken)) {
+      return;
+    }
+
+    await prisma.user.update({
       where: { id: userId },
-      data: { fcmToken: deviceToken, platform },
+      data: { notificationsPush: true },
+    });
+
+    return await prisma.pushToken.upsert({
+      where: { token: deviceToken },
+      update: { userId },
+      create: { token: deviceToken, userId },
+    });
+  }
+
+  async removeDeviceToken(userId: string, deviceToken: string) {
+    await findUserOrFail(userId);
+    prisma.user.update({
+      where: { id: userId },
+      data: {
+        notificationsPush: false,
+      },
+    });
+
+    return prisma.pushToken.deleteMany({
+      where: { token: deviceToken, userId },
     });
   }
 
