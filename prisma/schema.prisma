@@ -7,6 +7,10 @@ datasource db {
   url      = env("MONGO_URI")
 }
 
+// ─────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────
+
 enum UserRole {
   USER
   NANNY
@@ -46,11 +50,23 @@ enum BookingStatus {
 }
 
 enum ServiceType {
-  FULL_TIME
-  PART_TIME
-  BABYSITTING
-  OVERNIGHT
-  SPECIAL_NEEDS
+  // ── Scheduling & Billing Models ──
+  HOURLY // On-demand, flexible hours (e.g., date night)
+  PART_TIME // Regular schedule, under 30-40 hours/week
+  FULL_TIME // Regular schedule, 40+ hours/week
+  MONTHLY_SUBSCRIPTION // Retainer or guaranteed monthly hours
+  ONE_TIME // A single booking with no ongoing commitment
+
+  // ── Situation & Need-Based ──
+  OVERNIGHT // Nighttime care, sleep training help
+  EMERGENCY // Last-minute, urgent care (usually commands a premium rate)
+  EVENT // Weddings, parties, or corporate event sitting
+
+  // ── Specialized Care (Premium) ──
+  NEWBORN_CARE // Night nurse, specialized infant care
+  SPECIAL_NEEDS // Trained care for children with disabilities
+  MOTHERS_HELPER // Nanny helps out while parents are still in the house
+  TRAVEL_NANNY // Accompanies the family on vacations
 }
 
 enum NotificationType {
@@ -70,41 +86,146 @@ enum MessageType {
   DOCUMENT
 }
 
+enum GoalCategory {
+  COGNITIVE
+  PHYSICAL
+  SOCIAL
+  EMOTIONAL
+  CREATIVE
+}
+
+enum GoalPriority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum PlanDifficulty {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum TaskCategory {
+  COGNITIVE
+  PHYSICAL
+  SOCIAL
+  EMOTIONAL
+  CREATIVE
+  ROUTINE
+}
+
+enum TaskStatus {
+  PENDING // not yet acted on by nanny
+  COMPLETED // nanny marked done
+  SKIPPED // nanny marked skip (reason captured in TaskLog.nannyNote)
+}
+
+enum RequestedPlanStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+// Disability types used on both Children (permanent profile)
+// and RequestedDailyPlan (booking-level context for the nanny).
+// Array field — a child can have more than one condition.
+enum DisabilityType {
+  // Physical
+  CEREBRAL_PALSY
+  MUSCULAR_DYSTROPHY
+  SPINA_BIFIDA
+  LIMB_DIFFERENCE
+  MOBILITY_IMPAIRMENT
+
+  // Neurological / Developmental
+  AUTISM_SPECTRUM_DISORDER
+  ATTENTION_DEFICIT_HYPERACTIVITY_DISORDER
+  INTELLECTUAL_DISABILITY
+  LEARNING_DISABILITY
+  DEVELOPMENTAL_DELAY
+
+  // Sensory
+  VISUAL_IMPAIRMENT
+  HEARING_IMPAIRMENT
+  DEAF_BLIND
+
+  // Speech & Language
+  SPEECH_LANGUAGE_DISORDER
+  NONVERBAL
+
+  // Medical / Chronic
+  EPILEPSY
+  DOWN_SYNDROME
+  FRAGILE_X_SYNDROME
+  CHRONIC_ILLNESS
+
+  // Other
+  MULTIPLE_DISABILITIES
+  OTHER
+}
+
+type TimeSlot {
+  startTime DateTime
+  endTime   DateTime
+  bookingId String?  @db.ObjectId // Optional: link to the booking that reserved it
+  isBlock   Boolean  @default(false) // True if nanny blocked it manually (vacation/sick)
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODELS — Auth & User
+// ─────────────────────────────────────────────────────────────
+
 model User {
-  id                           String            @id @default(auto()) @map("_id") @db.ObjectId
-  mobile                       String            @unique
-  countryCode                  String            @default("+91")
-  name                         String            @default("")
+  id                           String    @id @default(auto()) @map("_id") @db.ObjectId
+  mobile                       String    @unique
+  countryCode                  String    @default("+91")
+  name                         String    @default("")
   email                        String?
   gender                       Gender?
   dateOfBirth                  DateTime?
   profilePhoto                 String?
-  isMobileVerified             Boolean           @default(false)
-  role                         UserRole          @default(USER)
-  fcmToken                     String?
+  isMobileVerified             Boolean   @default(false)
+  role                         UserRole  @default(USER)
   platform                     String?
   lastLoginAt                  DateTime?
   preferredNannyGender         Gender?
   languagesSpoken              String[]
-  notificationsSms             Boolean           @default(true)
-  notificationsPush            Boolean           @default(true)
+  notificationsSms             Boolean   @default(true)
+  notificationsPush            Boolean   @default(true)
   emergencyContactName         String?
   emergencyContactMobile       String?
   emergencyContactRelationship String?
-  createdAt                    DateTime          @default(now())
-  updatedAt                    DateTime          @updatedAt
-  childrens                    Children[]
-  otpRecord                    OtpRecord?
-  refreshTokens                RefreshToken[]
-  addresses                    Address[]
-  nannyProfile                 Nanny?
-  bookings                     Booking[]         @relation("UserBookings")
-  notifications                Notification[]
-  auditLogs                    AuditLog[]
-  chatParticipants             ChatParticipant[]
-  sentMessages                 ChatMessage[]
+  createdAt                    DateTime  @default(now())
+  updatedAt                    DateTime  @updatedAt
+
+  // Relations
+  pushTokens       PushToken[]
+  otpRecord        OtpRecord?
+  refreshTokens    RefreshToken[]
+  addresses        Address[]
+  childrens        Children[]
+  nannyProfile     Nanny?
+  bookings         Booking[]         @relation("UserBookings")
+  notifications    Notification[]
+  auditLogs        AuditLog[]
+  chatParticipants ChatParticipant[]
+  sentMessages     ChatMessage[]
 
   @@map("users")
+}
+
+model PushToken {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String?  @db.ObjectId
+  token     String   @unique
+  platform  String?  @default("android")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@map("push_tokens")
 }
 
 model OtpRecord {
@@ -157,63 +278,95 @@ model Address {
   @@map("addresses")
 }
 
+// ─────────────────────────────────────────────────────────────
+// MODELS — Nanny
+// ─────────────────────────────────────────────────────────────
+
 model Nanny {
-  id                  String      @id @default(auto()) @map("_id") @db.ObjectId
-  userId              String      @unique @db.ObjectId
+  id                  String        @id @default(auto()) @map("_id") @db.ObjectId
+  userId              String        @unique @db.ObjectId
   name                String
   mobile              String
   email               String?
   gender              Gender?
   dateOfBirth         DateTime?
   profilePhoto        String?
-  status              NannyStatus @default(PENDING_VERIFICATION)
-  isActive            Boolean     @default(false)
-  isAvailable         Boolean     @default(false)
-  isTrainingCompleted Boolean     @default(false)
-  experience          Int         @default(0)
+  status              NannyStatus   @default(PENDING_VERIFICATION)
+  isActive            Boolean       @default(false)
+  isAvailable         Boolean       @default(false)
+  isTrainingCompleted Boolean       @default(false)
+  experience          Int           @default(0)
   bio                 String?
   languages           String[]
-  serviceTypes        String[]
+  serviceTypes        ServiceType[]
   specializations     String[]
   ageGroupsHandled    String[]
-  hourlyRate          Float       @default(0)
+  hourlyRate          Float         @default(0)
   dailyRate           Float?
   serviceRadius       Int?
   workingAreas        String[]
-  rating              Float       @default(0)
-  totalReviews        Int         @default(0)
-  totalBookings       Int         @default(0)
-  documents           Json        @default("[]")
+  rating              Float         @default(0)
+  totalReviews        Int           @default(0)
+  totalBookings       Int           @default(0)
+  documents           Json          @default("[]")
   verifiedAt          DateTime?
   verifiedBy          String?
   rejectionReason     String?
   adminNotes          String?
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
-
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bookings Booking[] @relation("NannyBookings")
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  reservedSlot        TimeSlot[]
+  // Relations
+  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings            Booking[]     @relation("NannyBookings")
+  taskLogs            TaskLog[] // nanny's history of task completions across all bookings
 
   @@map("nannies")
 }
 
-model Children {
-  id        String     @id @default(auto()) @map("_id") @db.ObjectId
-  name      String
-  birthDate DateTime
-  age       Int?
-  gender    BabyGender
-  userId    String     @db.ObjectId // ✅ remove the ? — make it required
-  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bookings  Booking[]
+// ─────────────────────────────────────────────────────────────
+// MODELS — Children
+// disabilities[] is the permanent child profile.
+// AI reads this alongside parentGoalPrompt when generating plans.
+// ─────────────────────────────────────────────────────────────
 
-  @@map("childrens") // ✅ explicit collection name
+model Children {
+  id              String           @id @default(auto()) @map("_id") @db.ObjectId
+  userId          String           @db.ObjectId
+  name            String
+  birthDate       DateTime
+  age             Int?
+  gender          BabyGender
+  disabilities    DisabilityType[] @default([])
+  disabilityNotes String? // extra detail for OTHER or combined conditions
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  // Relations
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings   Booking[]
+  childGoals ChildGoal[]
+  dailyPlans DailyPlan[]
+  planTasks  PlanTask[]
+  taskLogs   TaskLog[]
+
+  @@map("childrens")
 }
+
+// ─────────────────────────────────────────────────────────────
+// MODELS — Booking (central hub)
+//
+// One booking owns:
+//   requestedDailyPlan (1:1) — parent fills manually, nanny reads
+//   childGoals         (1:N) — AI generates from parentGoalPrompt
+//   dailyPlan          (1:1) — AI master strategy, source for PlanTasks
+// ─────────────────────────────────────────────────────────────
 
 model Booking {
   id                  String        @id @default(auto()) @map("_id") @db.ObjectId
   userId              String        @db.ObjectId
   nannyId             String?       @db.ObjectId
+  childrenId          String        @db.ObjectId
   status              BookingStatus @default(PENDING_PAYMENT)
   serviceType         ServiceType
   scheduledStartTime  DateTime
@@ -221,39 +374,71 @@ model Booking {
   actualStartTime     DateTime?
   actualEndTime       DateTime?
   specialInstructions String?
-  children            Children      @relation(fields: [childrenId], references: [id])
-  addressLabel        String?
-  addressLine1        String
-  addressLine2        String?
-  addressCity         String
-  addressState        String
-  addressPincode      String
-  addressCountry      String        @default("IN")
-  addressLat          Float?
-  addressLng          Float?
-  baseAmount          Float
-  gstAmount           Float
-  totalAmount         Float
-  razorpayOrderId     String?
-  paymentId           String?
-  cancellationReason  String?
-  cancelledBy         String?
-  requestedTasks      Json?         @default("[]")
-  timeline            Json          @default("[]")
-  reviewRating        Int?
-  reviewComment       String?
-  reviewedAt          DateTime?
-  createdAt           DateTime      @default(now())
-  updatedAt           DateTime      @updatedAt
 
-  user       User      @relation("UserBookings", fields: [userId], references: [id])
-  nanny      Nanny?    @relation("NannyBookings", fields: [nannyId], references: [id])
-  payment    Payment?
-  chatRoom   ChatRoom?
-  childrenId String    @db.ObjectId
+  // Address snapshot (denormalised — survives future address edits)
+  addressLabel   String?
+  addressLine1   String
+  addressLine2   String?
+  addressCity    String
+  addressState   String
+  addressPincode String
+  addressCountry String  @default("IN")
+  addressLat     Float?
+  addressLng     Float?
+
+  // Payment
+  baseAmount      Float
+  gstAmount       Float
+  totalAmount     Float
+  razorpayOrderId String?
+  paymentId       String?
+
+  // Cancellation
+  cancellationReason String?
+  cancelledBy        String?
+
+  // Misc
+  requestedTasks Json?     @default("[]")
+  timeline       Json      @default("[]")
+  reviewRating   Int?
+  reviewComment  String?
+  reviewedAt     DateTime?
+
+  // ── AI input ──────────────────────────────────────────────
+  // Parent writes a free-text goal here (e.g. "I want my 2-year-old
+  // to improve speech and socialise more over the next 3 months").
+  // This is the ONLY field the AI reads to produce ChildGoals + DailyPlan.
+  parentGoalPrompt String?
+
+  // ── AI status ─────────────────────────────────────────────
+  aiPlanGenerated   Boolean   @default(false)
+  aiPlanGeneratedAt DateTime?
+  aiPlanError       String? // populated if AI generation fails
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ─────────────────────────────────────────────
+  user     User     @relation("UserBookings", fields: [userId], references: [id])
+  nanny    Nanny?   @relation("NannyBookings", fields: [nannyId], references: [id])
+  children Children @relation(fields: [childrenId], references: [id])
+
+  payment  Payment?
+  chatRoom ChatRoom?
+
+  // Parent routine — filled by parent, read by nanny on dashboard
+  requestedDailyPlan RequestedDailyPlan[]
+
+  // AI outputs — both generated on booking CONFIRMED
+  childGoals ChildGoal[] // 1:N — one prompt can produce multiple goals
+  dailyPlan  DailyPlan[] // 1:1 — single master plan per booking
 
   @@map("bookings")
 }
+
+// ─────────────────────────────────────────────────────────────
+// MODELS — Payments & Chat
+// ─────────────────────────────────────────────────────────────
 
 model Payment {
   id                String    @id @default(auto()) @map("_id") @db.ObjectId
@@ -351,4 +536,175 @@ model AuditLog {
   actor User @relation(fields: [actorId], references: [id])
 
   @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODEL — RequestedDailyPlan
+//
+// Filled by PARENT at booking time. Zero AI involvement.
+// Nanny reads this on the dashboard alongside AI-generated PlanTasks
+// to understand the child's routine, diet, and restrictions.
+//
+// bookingId is @unique → strict 1:1 with Booking
+// ─────────────────────────────────────────────────────────────
+
+model RequestedDailyPlan {
+  id              String              @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId       String              @unique @db.ObjectId
+  name            String?
+  status          RequestedPlanStatus @default(ACTIVE)
+  childAgeMonths  Int?
+  childGender     BabyGender?
+  disabilities    DisabilityType[]    @default([])
+  disabilityNotes String?
+  additionalNotes Json                @default("[]")
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  booking         Booking             @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@map("requested_daily_plans")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODEL — ChildGoal
+//
+// AI-generated on booking CONFIRMED.
+// AI reads Booking.parentGoalPrompt and structures it into goals.
+// One prompt can produce multiple goals (e.g. speech + social).
+//
+// Nanny sees these on the dashboard as the "why" behind tasks.
+// bookingId + childId both kept: childId enables querying all
+// goals for a child across bookings without joining through booking.
+// ─────────────────────────────────────────────────────────────
+
+model ChildGoal {
+  id                String       @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId         String       @db.ObjectId
+  childId           String       @db.ObjectId
+  name              String // e.g. "Improve expressive language"
+  category          GoalCategory // AI-classified
+  priority          GoalPriority @default(MEDIUM)
+  timelineMonths    Int? // AI-extracted, e.g. "3 months" → 3
+  parentDescription String // verbatim excerpt from parentGoalPrompt
+  milestones        Json         @default("[]") // AI monthly checkpoints
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  // Relations
+  booking   Booking    @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  child     Children   @relation(fields: [childId], references: [id], onDelete: Cascade)
+  planTasks PlanTask[] // tasks linked to this specific goal
+
+  @@map("child_goals")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODEL — DailyPlan
+//
+// AI master plan — generated ONCE on booking CONFIRMED.
+// Stores the overall strategy and week-by-week breakdown.
+// Every morning the scheduler reads this + recent TaskLogs
+// to generate that day's PlanTasks for the nanny.
+//
+// bookingId is @unique → strict 1:1 with Booking.
+// ─────────────────────────────────────────────────────────────
+
+model DailyPlan {
+  id                  String         @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId           String         @unique @db.ObjectId
+  childId             String         @db.ObjectId
+  overallStrategy     String? // AI's plain-English approach summary
+  weeklyFocusAreas    Json           @default("[]") // week-by-week breakdown
+  difficultyLevel     PlanDifficulty @default(MEDIUM)
+  totalPlannedMinutes Int            @default(0)
+  restWindows         String[]       @default([]) // e.g. ["12:00-14:00"]
+  rawAiResponse       Json // full Claude response, kept for debugging
+  lastGeneratedDate   DateTime? // date of most recent PlanTask batch
+  generatedAt         DateTime       @default(now())
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  // Relations
+  booking Booking    @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  child   Children   @relation(fields: [childId], references: [id], onDelete: Cascade)
+  tasks   PlanTask[]
+
+  @@map("daily_plans")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODEL — PlanTask
+//
+// AI generates a fresh batch each morning for that day.
+// Context used: DailyPlan (master strategy) + recent TaskLogs
+// (so AI can adapt difficulty based on yesterday's performance).
+//
+// These are what the nanny sees on the dashboard task list.
+// status is updated by the nanny (PENDING → COMPLETED / SKIPPED).
+//
+// childId kept here for direct dashboard queries:
+//   "give me today's tasks for child X" without joining through DailyPlan.
+// ─────────────────────────────────────────────────────────────
+
+model PlanTask {
+  id                String         @id @default(auto()) @map("_id") @db.ObjectId
+  planId            String         @db.ObjectId // parent DailyPlan
+  goalId            String?        @db.ObjectId // optional — which ChildGoal this serves
+  childId           String         @db.ObjectId // direct FK for dashboard queries
+  forDate           DateTime // the specific date these tasks are for
+  title             String // e.g. "Picture book storytelling"
+  category          TaskCategory
+  durationMinutes   Int // AI-suggested duration
+  scheduledTime     String // "HH:MM" — suggested start time
+  difficulty        PlanDifficulty @default(MEDIUM) // AI adapts daily from TaskLogs
+  description       String // what to do and how
+  materials         String[]       @default([]) // e.g. ["picture book", "crayons"]
+  successIndicators String[]       @default([]) // e.g. ["child points to 3 objects"]
+  nannyNotes        String? // AI guidance specific to this nanny session
+  skipIf            String? // condition under which nanny should skip
+  ifTooEasy         String? // escalation suggestion
+  ifTooHard         String? // de-escalation suggestion
+  status            TaskStatus     @default(PENDING)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  // Relations
+  plan  DailyPlan  @relation(fields: [planId], references: [id], onDelete: Cascade)
+  goal  ChildGoal? @relation(fields: [goalId], references: [id])
+  child Children   @relation(fields: [childId], references: [id], onDelete: Cascade)
+  log   TaskLog? // filled by nanny after task
+
+  @@map("plan_tasks")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODEL — TaskLog
+//
+// Filled by the nanny after completing or skipping each PlanTask.
+// The morning scheduler reads all TaskLogs for this booking
+// to adapt tomorrow's PlanTask difficulty and content.
+//
+// taskId is @unique → strict 1:1 with PlanTask.
+// planId / childId removed — reach via task.planId / task.childId.
+// ─────────────────────────────────────────────────────────────
+
+model TaskLog {
+  id               String    @id @default(auto()) @map("_id") @db.ObjectId
+  taskId           String    @unique @db.ObjectId
+  nannyId          String?   @db.ObjectId
+  completionPct    Int       @default(0) // 0–100, how much of the task was done
+  engagementRating Int? // 1–5, how engaged the child was
+  moodRating       Int? // 1–5, child's mood during the task
+  nannyNote        String? // free text observations / skip reason
+  completedAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  // Relations
+  task       PlanTask  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  nanny      Nanny?    @relation(fields: [nannyId], references: [id])
+  Children   Children? @relation(fields: [childrenId], references: [id])
+  childrenId String?   @db.ObjectId
+
+  @@map("task_logs")
 }
