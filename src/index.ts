@@ -24,6 +24,7 @@ import { notificationRouter } from './routes/notification.routes';
 import { adminRouter }        from './routes/admin.routes';
 
 import { errorHandler, notFound } from './middlewares/index';
+import { seedRouter } from './routes/seed.routes';
 
 const log = createLogger('app');
 const app = express();
@@ -92,11 +93,13 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 /* ── Health check ───────────────────────────────────────────────────────── */
-app.get('/health', (_req, res) => {
+app.get('/health',(_req, res) => {
   res.json({ status: 'ok', service: 'nanny-app', env: config.env, timestamp: new Date().toISOString() });
 });
 
+
 /* ── API Routes ─────────────────────────────────────────────────────────── */
+app.use('/api/v1/pushData', seedRouter);
 app.use('/api/v1/auth',          authRouter);
 app.use('/api/v1/users',         userRouter);
 app.use('/api/v1/nannies',       nannyRouter);
