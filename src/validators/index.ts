@@ -115,9 +115,9 @@ export const S = {
         Joi.string().valid(
           "FULL_TIME",
           "PART_TIME",
-          "BABYSITTING",
+          "ONE_TIME",
           "OVERNIGHT",
-          "SPECIAL_NEEDS",
+          "EMERGENCY",
         ),
       )
       .min(1)
@@ -127,20 +127,20 @@ export const S = {
     hourlyRate: Joi.number().min(0).required(),
     dailyRate: Joi.number().min(0),
     serviceRadius: Joi.number().integer().min(1).max(200),
-    workingAreas: Joi.array().items(Joi.string()).default([]),
-    documents: Joi.array()
-      .items(
-        Joi.object({
-          type: Joi.string()
-            .valid("AADHAR", "PAN", "PASSPORT", "DRIVING_LICENSE", "VOTER_ID")
-            .required(),
-          documentNumber: Joi.string().required(),
-          frontImageUrl: Joi.string().uri().required(),
-          backImageUrl: Joi.string().uri(),
-        }),
-      )
-      .min(1)
-      .required(),
+    // workingAreas: Joi.array().items(Joi.string()).default([]),
+    // documents: Joi.array()
+    //   .items(
+    //     Joi.object({
+    //       type: Joi.string()
+    //         .valid("AADHAR", "PAN", "PASSPORT", "DRIVING_LICENSE", "VOTER_ID")
+    //         .required(),
+    //       documentNumber: Joi.string().required(),
+    //       frontImageUrl: Joi.string().uri().required(),
+    //       backImageUrl: Joi.string().uri(),
+    //     }),
+    //   )
+    //   .min(1)
+    //   .required(),
   }),
   nannyUpdate: Joi.object({
     bio: Joi.string().min(20).max(1000),
