@@ -1,22 +1,32 @@
-import { prisma } from '../config/prisma';
-import { AppError } from '../utils/AppError';
-import { createLogger } from '../utils/logger';
-import { paginate, paginatedResult } from '../utils/response';
-import { NannyStatus } from '@prisma/client';
+import { prisma } from "../config/prisma";
+import { AppError } from "../utils/AppError";
+import { createLogger } from "../utils/logger";
+import { paginate, paginatedResult } from "../utils/response";
+import { NannyStatus } from "@prisma/client";
 
-const log = createLogger('nanny');
+const log = createLogger("nanny");
 
 async function findNannyByUserOrFail(userId: string) {
   const nanny = await prisma.nanny.findUnique({ where: { userId } });
-  if (!nanny) throw new AppError('Nanny profile not found. Please register as a nanny first.', 404);
+  if (!nanny)
+    throw new AppError(
+      "Nanny profile not found. Please register as a nanny first.",
+      404,
+    );
   return nanny;
 }
 
 export class NannyService {
-
   /* ── POST /api/v1/nannies/register (no auth — creates user + nanny) ── */
   async register(body: any) {
-     const { mobile, countryCode = '+91', documents, dateOfBirth, gender, ...nannyFields } = body;
+    const {
+      mobile,
+      countryCode = "+91",
+      documents,
+      dateOfBirth,
+      gender,
+      ...nannyFields
+    } = body;
 
     if (!mobile) {
       throw new AppError("Mobile number is required", 400);
@@ -24,57 +34,78 @@ export class NannyService {
 
     const existingNanny = await prisma.nanny.findFirst({
       where: {
-        mobile
-      }
+        mobile,
+      },
     });
 
-    if (existingNanny) throw new AppError('This mobile number is already registered as a nanny.', 409);
+    if (existingNanny)
+      throw new AppError(
+        "This mobile number is already registered as a nanny.",
+        409,
+      );
 
     // Edge case: if user account exists with this mobile, check they don't already have a nanny profile
     const existingUser = await prisma.user.findUnique({ where: { mobile } });
     if (existingUser) {
-      const existingProfile = await prisma.nanny.findUnique({ where: { userId: existingUser.id } });
-      if (existingProfile) throw new AppError('A nanny profile already exists for this account.', 409);
+      const existingProfile = await prisma.nanny.findUnique({
+        where: { userId: existingUser.id },
+      });
+      if (existingProfile)
+        throw new AppError(
+          "A nanny profile already exists for this account.",
+          409,
+        );
     }
 
     // Create or update user account and set role to NANNY
     const user = await prisma.user.upsert({
-      where:  { mobile },
-      create: { mobile, countryCode, role: 'NANNY', name: nannyFields.name, gender: gender ?? undefined },
-      update: { role: 'NANNY', name: nannyFields.name, gender: gender ?? undefined, countryCode },
+      where: { mobile },
+      create: {
+        mobile,
+        countryCode,
+        role: "NANNY",
+        name: nannyFields.name,
+        gender: gender ?? undefined,
+      },
+      update: {
+        role: "NANNY",
+        name: nannyFields.name,
+        gender: gender ?? undefined,
+        countryCode,
+      },
     });
 
     const nanny = await prisma.nanny.create({
       data: {
-        userId:           user.id,
+        userId: user.id,
         mobile,
-        name:             nannyFields.name,
-        email:            nannyFields.email ?? null,
-        gender:           gender ?? null,
-        dateOfBirth:      dateOfBirth ? new Date(dateOfBirth) : null,
-        experience:       nannyFields.experience,
-        bio:              nannyFields.bio,
-        languages:        nannyFields.languages,
-        serviceTypes:     nannyFields.serviceTypes,
-        specializations:  nannyFields.specializations ?? [],
+        name: nannyFields.name,
+        email: nannyFields.email ?? null,
+        gender: gender ?? null,
+        dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
+        experience: nannyFields.experience,
+        bio: nannyFields.bio,
+        languages: nannyFields.languages,
+        serviceTypes: nannyFields.serviceTypes,
+        specializations: nannyFields.specializations ?? [],
         ageGroupsHandled: nannyFields.ageGroupsHandled,
-        hourlyRate:       nannyFields.hourlyRate,
-        dailyRate:        nannyFields.dailyRate ?? null,
-        serviceRadius:    nannyFields.serviceRadius ?? null,
-        workingAreas:     nannyFields.workingAreas ?? [],
-        documents:        documents as any,
-        status:           NannyStatus.PENDING_VERIFICATION,
-        isActive:         false,
-        isAvailable:      false,
+        hourlyRate: nannyFields.hourlyRate,
+        dailyRate: nannyFields.dailyRate ?? null,
+        serviceRadius: nannyFields.serviceRadius ?? null,
+        workingAreas: nannyFields.workingAreas ?? [],
+        documents: documents as any,
+        status: NannyStatus.PENDING_VERIFICATION,
+        isActive: false,
+        isAvailable: false,
       },
     });
 
     log.info(`Nanny registered: ${nanny.id} mobile=${mobile}`);
     return {
-      id:      nanny.id,
-      userId:  user.id,
-      status:  nanny.status,
-      message: 'Registration successful. Your profile is under review.',
+      id: nanny.id,
+      userId: user.id,
+      status: nanny.status,
+      message: "Registration successful. Your profile is under review.",
     };
   }
 
@@ -82,9 +113,9 @@ export class NannyService {
   async search(query: any) {
     const { page, limit, skip } = paginate(query);
     const where: any = {
-      status:      NannyStatus.VERIFIED,
+      status: NannyStatus.VERIFIED,
       isAvailable: true,
-      isActive:    true,
+      isActive: true,
     };
 
     if (query.serviceType) {
@@ -109,13 +140,26 @@ export class NannyService {
         where,
         skip,
         take: limit,
-        orderBy: { rating: 'desc' },
+        orderBy: { rating: "desc" },
         select: {
-          id: true, name: true, gender: true, profilePhoto: true, experience: true,
-          bio: true, languages: true, serviceTypes: true, specializations: true,
-          ageGroupsHandled: true, hourlyRate: true, dailyRate: true,
-          serviceRadius: true, workingAreas: true, rating: true,
-          totalReviews: true, totalBookings: true, isAvailable: true,
+          id: true,
+          name: true,
+          gender: true,
+          profilePhoto: true,
+          experience: true,
+          bio: true,
+          languages: true,
+          serviceTypes: true,
+          specializations: true,
+          ageGroupsHandled: true,
+          hourlyRate: true,
+          dailyRate: true,
+          serviceRadius: true,
+          workingAreas: true,
+          rating: true,
+          totalReviews: true,
+          totalBookings: true,
+          isAvailable: true,
         },
       }),
       prisma.nanny.count({ where }),
@@ -129,15 +173,30 @@ export class NannyService {
     const nanny = await prisma.nanny.findUnique({
       where: { id: nannyId },
       select: {
-        id: true, name: true, gender: true, profilePhoto: true, status: true,
-        experience: true, bio: true, languages: true, serviceTypes: true,
-        specializations: true, ageGroupsHandled: true, hourlyRate: true,
-        dailyRate: true, serviceRadius: true, workingAreas: true,
-        rating: true, totalReviews: true, totalBookings: true,
-        isAvailable: true, isActive: true, createdAt: true,
+        id: true,
+        name: true,
+        gender: true,
+        profilePhoto: true,
+        status: true,
+        experience: true,
+        bio: true,
+        languages: true,
+        serviceTypes: true,
+        specializations: true,
+        ageGroupsHandled: true,
+        hourlyRate: true,
+        dailyRate: true,
+        serviceRadius: true,
+        workingAreas: true,
+        rating: true,
+        totalReviews: true,
+        totalBookings: true,
+        isAvailable: true,
+        isActive: true,
+        createdAt: true,
       },
     });
-    if (!nanny) throw new AppError('Nanny not found', 404);
+    if (!nanny) throw new AppError("Nanny not found", 404);
     return nanny;
   }
 
@@ -147,13 +206,18 @@ export class NannyService {
     const nanny = await findNannyByUserOrFail(userId);
 
     const data: Record<string, any> = {};
-    if (body.bio          !== undefined) data.bio          = body.bio;
-    if (body.hourlyRate   !== undefined) data.hourlyRate   = body.hourlyRate;
-    if (body.dailyRate    !== undefined) data.dailyRate    = body.dailyRate;
-    if (body.languages    !== undefined) data.languages    = body.languages;
+    if (body.bio !== undefined) data.bio = body.bio;
+    if (body.hourlyRate !== undefined) data.hourlyRate = body.hourlyRate;
+    if (body.dailyRate !== undefined) data.dailyRate = body.dailyRate;
+    if (body.languages !== undefined) data.languages = body.languages;
     if (body.workingAreas !== undefined) data.workingAreas = body.workingAreas;
-    if (body.serviceRadius!== undefined) data.serviceRadius= body.serviceRadius;
+    if (body.serviceRadius !== undefined)
+      data.serviceRadius = body.serviceRadius;
     if (body.profilePhoto !== undefined) data.profilePhoto = body.profilePhoto;
+    if (body.specializations !== undefined)
+      data.specializations = body.specializations;
+
+    console.log(data);
 
     return prisma.nanny.update({ where: { id: nanny.id }, data });
   }
@@ -171,12 +235,15 @@ export class NannyService {
     }
     // Edge case: suspended nannies cannot change availability
     if (nanny.status === NannyStatus.SUSPENDED) {
-      throw new AppError('Suspended nannies cannot change their availability.', 403);
+      throw new AppError(
+        "Suspended nannies cannot change their availability.",
+        403,
+      );
     }
 
     return prisma.nanny.update({
       where: { id: nanny.id },
-      data:  { isAvailable },
+      data: { isAvailable },
     });
   }
 
@@ -192,9 +259,11 @@ export class NannyService {
         where,
         skip,
         take: limit,
-        orderBy: { scheduledStartTime: 'desc' },
+        orderBy: { scheduledStartTime: "desc" },
         include: {
-          user: { select: { id: true, name: true, mobile: true, profilePhoto: true } },
+          user: {
+            select: { id: true, name: true, mobile: true, profilePhoto: true },
+          },
         },
       }),
       prisma.booking.count({ where }),

@@ -150,6 +150,7 @@ export const S = {
     workingAreas: Joi.array().items(Joi.string()),
     serviceRadius: Joi.number().integer().min(1).max(200),
     profilePhoto: Joi.string().uri(),
+    specializations: Joi.array().items(Joi.string()).default([]),
   }).min(1),
   availability: Joi.object({ isAvailable: Joi.boolean().required() }),
 

@@ -24,6 +24,7 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
 
 // PATCH /api/v1/nannies/me  ← MUST be before /:id to avoid route conflict
 router.patch('/me', auth, roles('NANNY'), validate(S.nannyUpdate), async (req: Request, res: Response, next: NextFunction) => {
+  console.log("main body",req.body)
   try { res.json(ok(await service.updateMyProfile(req.user!.userId, req.body), 'Profile updated')); } catch (e) { next(e); }
 });
 

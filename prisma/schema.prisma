@@ -307,6 +307,7 @@ model Nanny {
   workingAreas        String[]
   rating              Float         @default(0)
   totalReviews        Int           @default(0)
+  ratingData          Json?         @default("[]")
   totalBookings       Int           @default(0)
   documents           Json          @default("[]")
   verifiedAt          DateTime?

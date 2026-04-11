@@ -3,6 +3,7 @@ import { LocationService } from '../services/location.service';
 import { auth, roles, validate } from '../middlewares/index';
 import { S } from '../validators/index';
 import { ok } from '../utils/response';
+import { prisma } from '../config/prisma';
 
 const router  = Router();
 const service = new LocationService();
@@ -14,6 +15,77 @@ router.patch('/nanny', roles('NANNY'), validate(S.updateLocation), async (req: R
   try {
     res.json(ok(await service.updateMyLocation(req.user!.userId, req.body.latitude, req.body.longitude), 'Location updated'));
   } catch (e) { next(e); }
+});
+
+// GET /api/v1/location/explore  ← MUST be before /nanny/:nannyId to avoid route collision
+router.get('/explore', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.userId;
+    const {
+      childId, careType, startTime, endTime, budget, 
+      preferredGender, languages, requirements, addressId
+    } = req.query;
+
+    // 1. Get Address Coordinates
+    let lat: number | undefined;
+    let lng: number | undefined;
+    
+    const addressWhere = addressId 
+      ? { id: String(addressId) } 
+      : { userId: String(userId), isDefault: true };
+
+    const userAddress = await prisma.address.findFirst({ where: addressWhere });
+    
+    if (userAddress && userAddress.lat && userAddress.lng) {
+      lat = userAddress.lat;
+      lng = userAddress.lng;
+    }
+
+    // 2. Get Child's Age Group
+    let childAgeGroup: string | undefined;
+    if (childId) {
+      const child = await prisma.children.findUnique({ where: { id: String(childId) } });
+      if (child && child.birthDate) {
+        // Calculate age in years
+        const ageInYears = (new Date().getTime() - child.birthDate.getTime()) / (1000 * 60 * 60 * 24 * 365.25);
+        if (ageInYears < 1) childAgeGroup = "0-1 years";
+        else if (ageInYears >= 1 && ageInYears < 3) childAgeGroup = "1-3 years";
+        else if (ageInYears >= 3 && ageInYears < 6) childAgeGroup = "3-6 years";
+        else childAgeGroup = "6+ years";
+      }
+    }
+
+    // 3. Parse Budget String
+    let minRate = 0;
+    let maxRate = 99999;
+    if (budget && typeof budget === 'string') {
+      const numbers = budget.match(/\d+/g); 
+      if (numbers && numbers.length >= 2) {
+        minRate = parseInt(numbers[0], 10);
+        maxRate = parseInt(numbers[1], 10);
+      }
+    }
+
+    // 4. Pass parameters to the Explore Service
+    const matches = await service.exploreNannies({
+      lat,
+      lng,
+      radius: 15, // Default 15km search radius
+      careType: careType as string,
+      reqStartTime: startTime as string,
+      reqEndTime: endTime as string,
+      minRate,
+      maxRate,
+      preferredGender: preferredGender as string,
+      languages: languages ? String(languages).split(',') : [],
+      requirements: requirements ? String(requirements).split(',') : [],
+      childAgeGroup
+    });
+
+    res.json(ok(matches, 'Explore nannies successfully retrieved'));
+  } catch (e) { 
+    next(e); 
+  }
 });
 
 // GET /api/v1/location/nannies/nearby  ← MUST be before /nanny/:nannyId
