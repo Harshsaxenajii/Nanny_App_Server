@@ -4,7 +4,7 @@ import { AuthService } from '../services/auth.service';
 import { auth, validate } from '../middlewares/index';
 import { S } from '../validators/index';
 import { ok } from '../utils/response';
-import { sendPushToAll } from '../services/pushNotification.service';
+import { broadcastNormalNotification, sendBookingRequestNotification } from '../services/pushNotification.service';
 
 const router  = Router();
 const service = new AuthService();
@@ -50,10 +50,29 @@ router.post('/logout', validate(S.logout), async (req: Request, res: Response, n
 
 router.get("/test-notification/:message", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    await sendPushToAll("Test Notification", req.params.message);
+    await broadcastNormalNotification("Test Notification", req.params.message);
     res.json(ok(null, 'Test notification sent!'));
   } catch (e) { next(e); }
 });
 
+router.get("/test-booking-noti/:userId", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await sendBookingRequestNotification(req.params.userId, {
+      bookingId:    "test-booking-001",
+      parentName:   "Priya Sharma",
+      parentPhoto:  "",
+      location:     "Connaught Place",
+      address:      "Block A, CP, New Delhi - 110001",
+      price:        "₹450/hr",
+      duration:     "3 hours",
+      startTime:    "Today, 4:00 PM",
+      childAge:     "2 kids · 3 & 6 yrs",
+      distance:     "1.2 km away",
+      specialNotes: "Please bring activity books. Kids are allergic to peanuts.",
+      expiresIn:    30,
+    });
+    res.json(ok(null, "Test booking notification sent!"));
+  } catch (e) { next(e); }
+});
 
 export { router as authRouter };
