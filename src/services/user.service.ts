@@ -1,4 +1,3 @@
-import Expo from "expo-server-sdk";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/AppError";
 import { createLogger } from "../utils/logger";
@@ -41,6 +40,7 @@ export class UserService {
       },
     });
     if (!user) throw new AppError("User not found", 404);
+    console.log("User profile retrieved for userId: ", userId);
 
     const {
       id,
@@ -65,7 +65,7 @@ export class UserService {
       emergencyContactMobile,
       emergencyContactRelationship,
       addresses,
-      createdAt,
+      // createdAt,
       updatedAt,
     } = user;
 
@@ -84,7 +84,7 @@ export class UserService {
       platform,
       lastLoginAt,
       childrens,
-      createdAt,
+      // createdAt,
       updatedAt,
       preferences: {
         preferredNannyGender,
@@ -124,7 +124,11 @@ export class UserService {
       throw new AppError("No valid fields to update", 400);
 
     console.log("sending push notification to userId: ", userId);
-    sendPushToUser(userId, "Profile Updated", "Your profile information has been updated successfully.");
+    sendPushToUser(
+      userId,
+      "Profile Updated",
+      "Your profile information has been updated successfully.",
+    );
 
     return prisma.user.update({ where: { id: userId }, data });
   }
@@ -306,6 +310,8 @@ export class UserService {
 
   async updateAddress(userId: string, addressId: string, body: any) {
     const addr = await findAddressOrFail(addressId, userId);
+    console.log("Existing address data: ", addr);
+    console.log("Incoming update data: ", body);
     const coords = body.coordinates?.coordinates;
     const data: Record<string, any> = {};
 
@@ -383,7 +389,7 @@ export class UserService {
     platform: string,
   ) {
     await findUserOrFail(userId);
-    if (!deviceToken || !Expo.isExpoPushToken(deviceToken)) {
+    if (!deviceToken) {
       return;
     }
 
