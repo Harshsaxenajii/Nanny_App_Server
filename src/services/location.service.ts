@@ -187,147 +187,67 @@ export class LocationService {
       childAgeGroup,
     } = params;
 
-    console.log("\n--- STARTING NANNY EXPLORE FILTERS ---");
+    const whereClause: any = {
+      status: "VERIFIED",
+      isActive: true,
+      isAvailable: true,
+    };
 
-    // 1. Fetch Baseline Nannies (Verified, Active, Available)
+    if (maxRate) whereClause.hourlyRate = { lte: maxRate };
+    if (preferredGender && preferredGender !== "Any")
+      whereClause.gender = preferredGender;
+    if (careType)
+      whereClause.serviceTypes = {
+        has: careType.replace(" ", "_").toUpperCase(),
+      };
+    if (languages && languages.length > 0)
+      whereClause.languages = { hasSome: languages };
+    if (requirements && requirements.length > 0)
+      whereClause.specializations = { hasEvery: requirements };
+    if (childAgeGroup) whereClause.ageGroupsHandled = { has: childAgeGroup };
+
+    // ❌ DATE FILTER PRISMA SE HATA DIYA (No more crashes)
+
+    // 1. Fetch filtered data from DB (Super fast)
     let availableNannies = await prisma.nanny.findMany({
-      where: {
-        status: "VERIFIED",
-        isActive: true,
-        isAvailable: true,
-      },
-      include: {
+      where: whereClause,
+      select: {
+        id: true,
+        name: true,
+        rating: true,
+        totalReviews: true,
+        experience: true,
+        bio: true,
+        specializations: true,
+        hourlyRate: true,
+        profilePhoto: true,
+        serviceRadius: true,
+        reservedSlot: true, // 🔥 Bring slots back into memory
         user: {
           select: {
             name: true,
             profilePhoto: true,
-            addresses: { where: { isDefault: true } },
+            addresses: {
+              where: { isDefault: true },
+              select: { lat: true, lng: true },
+            },
           },
         },
-        reservedSlot: true,
       },
     });
 
-    console.log(
-      `[Step 0] Baseline Available Nannies: ${availableNannies.length}`,
-    );
-
-    // Step 1: Strict Distance Calculation & Filtering
-    if (lat && lng) {
-      console.log("\n--- Calculating Distances ---");
-
-      // 🔥 FIX: Strictly enforce the search radius limit (defaults to 15km if not provided)
-      const searchRadius = radius ? Number(radius) : 15;
-
-      availableNannies = availableNannies.filter((nanny: any) => {
-        const nannyAddress = nanny.user?.addresses?.[0];
-        if (!nannyAddress || !nannyAddress.lat || !nannyAddress.lng) {
-          console.log(
-            `Nanny: ${nanny.user?.name || nanny.name} | Distance: UNKNOWN (Skipping)`,
-          );
-          return false; // Exclude nannies with missing coordinates
-        }
-
-        const distanceKm = haversineKm(
-          lat,
-          lng,
-          nannyAddress.lat,
-          nannyAddress.lng,
-        );
-        console.log(
-          `Nanny: ${nanny.user?.name || nanny.name} | Distance: ${distanceKm.toFixed(2)} km`,
-        );
-
-        nanny.distance = distanceKm;
-
-        // 🔥 FIX: Distance must be strictly LESS than the parent's search radius
-        // AND less than the nanny's maximum willing travel radius.
-        const nannyMaxTravel = nanny.serviceRadius || 50; // Fallback if nanny didn't set one
-
-        return distanceKm <= searchRadius && distanceKm <= nannyMaxTravel;
-      });
-      console.log(
-        `[Step 1] Nannies strictly within ${searchRadius}km radius: ${availableNannies.length}`,
-      );
-    } else {
-      console.log(
-        `[Step 1] WARNING: No lat/lng provided! Skipping distance filter.`,
-      );
-    }
-
-    // Step 2: Budget (Strictly Max Rate, ignoring minimum)
-    if (maxRate) {
-      availableNannies = availableNannies.filter((nanny: any) => {
-        const rate = nanny.hourlyRate || 0;
-        return rate <= maxRate;
-      });
-      console.log(
-        `[Step 2] Nannies within budget (<= ₹${maxRate}): ${availableNannies.length}`,
-      );
-    }
-
-    // Step 3: Gender
-    if (preferredGender && preferredGender !== "Any") {
-      availableNannies = availableNannies.filter(
-        (nanny: any) => nanny.gender === preferredGender,
-      );
-      console.log(
-        `[Step 3] Nannies matching gender (${preferredGender}): ${availableNannies.length}`,
-      );
-    }
-
-    // Step 4: Languages (Has Some)
-    if (languages && languages.length > 0) {
-      availableNannies = availableNannies.filter((nanny: any) => {
-        const nannyLangs = nanny.languages || [];
-        return languages.some((lang: string) => nannyLangs.includes(lang));
-      });
-      console.log(
-        `[Step 4] Nannies matching languages: ${availableNannies.length}`,
-      );
-    }
-
-    // Step 5: Care Type
-    if (careType) {
-      const formattedType = careType.replace(" ", "_").toUpperCase();
-      availableNannies = availableNannies.filter((nanny: any) => {
-        const types = nanny.serviceTypes || [];
-        return types.includes(formattedType);
-      });
-      console.log(
-        `[Step 5] Nannies offering care type (${formattedType}): ${availableNannies.length}`,
-      );
-    }
-
-    // Step 6: Requirements/Specializations (Has Every)
-    if (requirements && requirements.length > 0) {
-      availableNannies = availableNannies.filter((nanny: any) => {
-        const specs = nanny.specializations || [];
-        return requirements.every((req: string) => specs.includes(req));
-      });
-      console.log(
-        `[Step 6] Nannies matching all requirements: ${availableNannies.length}`,
-      );
-    }
-
-    // Step 7: Age Group
-    if (childAgeGroup) {
-      availableNannies = availableNannies.filter((nanny: any) => {
-        const ages = nanny.ageGroupsHandled || [];
-        return ages.includes(childAgeGroup);
-      });
-      console.log(
-        `[Step 7] Nannies handling age group (${childAgeGroup}): ${availableNannies.length}`,
-      );
-    }
-
-    // Step 8: Time Slot Availability (No overlaps)
+    // 2. ⏰ MEMORY FILTER FOR TIME (Bulletproof & Fast)
     if (reqStartTime && reqEndTime) {
       const reqStart = new Date(reqStartTime).getTime();
       const reqEnd = new Date(reqEndTime).getTime();
 
       availableNannies = availableNannies.filter((nanny: any) => {
-        const slots = nanny.reservedSlot || [];
+        // Safe check: handles if reservedSlot is an Array OR a Single Object
+        const slots = Array.isArray(nanny.reservedSlot)
+          ? nanny.reservedSlot
+          : nanny.reservedSlot
+            ? [nanny.reservedSlot]
+            : [];
 
         const hasOverlap = slots.some((slot: any) => {
           const slotStart = new Date(slot.startTime).getTime();
@@ -335,21 +255,38 @@ export class LocationService {
           return slotStart < reqEnd && slotEnd > reqStart;
         });
 
-        return !hasOverlap;
+        return !hasOverlap; // Keep nanny if NO overlap
       });
-      console.log(
-        `[Step 8] Nannies available during requested time: ${availableNannies.length}`,
-      );
     }
 
-    console.log("--- EXPLORE FILTERS COMPLETE ---\n");
+    // 3. 📍 MEMORY FILTER FOR DISTANCE
+    if (lat && lng) {
+      const searchRadius = radius ? Number(radius) : 15;
 
-    // 2. Sort remaining nannies by distance (closest first)
+      availableNannies = availableNannies.filter((nanny: any) => {
+        const nannyAddress = nanny.user?.addresses?.[0];
+        if (!nannyAddress || !nannyAddress.lat || !nannyAddress.lng)
+          return false;
+
+        const distanceKm = haversineKm(
+          lat,
+          lng,
+          nannyAddress.lat,
+          nannyAddress.lng,
+        );
+        nanny.distance = distanceKm;
+
+        const nannyMaxTravel = nanny.serviceRadius || 50;
+        return distanceKm <= searchRadius && distanceKm <= nannyMaxTravel;
+      });
+    }
+
+    // Sort by distance
     availableNannies.sort(
       (a: any, b: any) => (a.distance || 0) - (b.distance || 0),
     );
 
-    // 3. Format for the React Native Frontend
+    // 4. Format for Frontend
     return availableNannies.map((nanny: any) => ({
       id: nanny.id,
       name: nanny.user?.name || nanny.name,
@@ -365,5 +302,95 @@ export class LocationService {
       isOnline: true,
       isFavorite: false,
     }));
+  }
+
+  async countAvailableNannies(params: any): Promise<number> {
+    const {
+      lat,
+      lng,
+      radius,
+      careType,
+      reqStartTime,
+      reqEndTime,
+      maxRate,
+      preferredGender,
+      languages,
+      requirements,
+      childAgeGroup,
+    } = params;
+
+    const whereClause: any = {
+      status: "VERIFIED",
+      isActive: true,
+      isAvailable: true,
+    };
+
+    if (maxRate) whereClause.hourlyRate = { lte: maxRate };
+    if (preferredGender && preferredGender !== "Any")
+      whereClause.gender = preferredGender;
+    if (careType)
+      whereClause.serviceTypes = {
+        has: careType.replace(" ", "_").toUpperCase(),
+      };
+    if (languages && languages.length > 0)
+      whereClause.languages = { hasSome: languages };
+    if (requirements && requirements.length > 0)
+      whereClause.specializations = { hasEvery: requirements };
+    if (childAgeGroup) whereClause.ageGroupsHandled = { has: childAgeGroup };
+
+    // Get the minimal data needed to count (Time & Distance logic done in memory)
+    let nanniesForCount = await prisma.nanny.findMany({
+      where: whereClause,
+      select: {
+        serviceRadius: true,
+        reservedSlot: true,
+        user: {
+          select: {
+            addresses: {
+              where: { isDefault: true },
+              select: { lat: true, lng: true },
+            },
+          },
+        },
+      },
+    });
+
+    // ⏰ Time Filter
+    if (reqStartTime && reqEndTime) {
+      const reqStart = new Date(reqStartTime).getTime();
+      const reqEnd = new Date(reqEndTime).getTime();
+
+      nanniesForCount = nanniesForCount.filter((nanny: any) => {
+        const slots = Array.isArray(nanny.reservedSlot)
+          ? nanny.reservedSlot
+          : nanny.reservedSlot
+            ? [nanny.reservedSlot]
+            : [];
+
+        const hasOverlap = slots.some((slot: any) => {
+          const slotStart = new Date(slot.startTime).getTime();
+          const slotEnd = new Date(slot.endTime).getTime();
+          return slotStart < reqEnd && slotEnd > reqStart;
+        });
+
+        return !hasOverlap;
+      });
+    }
+
+    // 📍 Distance Filter
+    if (lat && lng) {
+      const searchRadius = radius ? Number(radius) : 15;
+
+      nanniesForCount = nanniesForCount.filter((nanny: any) => {
+        const address = nanny.user?.addresses?.[0];
+        if (!address?.lat || !address?.lng) return false;
+
+        const distanceKm = haversineKm(lat, lng, address.lat, address.lng);
+        const maxTravel = nanny.serviceRadius || 50;
+        return distanceKm <= searchRadius && distanceKm <= maxTravel;
+      });
+    }
+
+    return nanniesForCount.length;
   }
 }
