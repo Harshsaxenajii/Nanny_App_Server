@@ -1,230 +1,119 @@
-import { prisma } from "../config/prisma";
+import { PrismaClient } from '@prisma/client';
 
-const getRandom = (min: number, max: number) =>
-  Math.floor(Math.random() * (max - min + 1)) + min;
+const prisma = new PrismaClient();
 
-const getRating = () => parseFloat((Math.random() * (5 - 4) + 4).toFixed(1));
+export const seedTestBooking = async () => {
+  const startDate = new Date();
+  const endDate = new Date();
+  endDate.setDate(startDate.getDate() + 35);
 
-const ratingData = [
-  {
-    rating: 5,
-    review: "Very caring and professional nanny.",
-    reviewerName: "Parent A",
-    createdAt: new Date(),
-  },
-  {
-    rating: 4,
-    review: "Good with kids, punctual.",
-    reviewerName: "Parent B",
-    createdAt: new Date(),
-  },
-];
-
-export const runSeedLogic = async () => {
-  const nannies = [
-    // 🔵 Bangalore (Sarjapur / HSR / Bellandur)
-    {
-      name: "Anjali Verma",
-      mobile: "9000000011",
-      exp: 4,
-      lat: 12.8221,
-      lng: 77.663,
-      city: "Bangalore",
-      area: "Sarjapur Road",
-      pincode: "560035",
-    },
-    {
-      name: "Pooja Sharma",
-      mobile: "9000000012",
-      exp: 6,
-      lat: 12.8195,
-      lng: 77.6612,
-      city: "Bangalore",
-      area: "HSR Layout",
-      pincode: "560102",
-    },
-    {
-      name: "Meena Kumari",
-      mobile: "9000000013",
-      exp: 3,
-      lat: 12.825,
-      lng: 77.6655,
-      city: "Bangalore",
-      area: "Bellandur",
-      pincode: "560103",
-    },
-    {
-      name: "Kavita Reddy",
-      mobile: "9000000014",
-      exp: 7,
-      lat: 12.8238,
-      lng: 77.6601,
-      city: "Bangalore",
-      area: "Electronic City",
-      pincode: "560100",
-    },
-    {
-      name: "Sunita Yadav",
-      mobile: "9000000015",
-      exp: 5,
-      lat: 12.8202,
-      lng: 77.6599,
-      city: "Bangalore",
-      area: "Sarjapur",
-      pincode: "560035",
-    },
-    {
-      name: "Ritu Singh",
-      mobile: "9000000016",
-      exp: 2,
-      lat: 12.821,
-      lng: 77.667,
-      city: "Bangalore",
-      area: "Bellandur",
-      pincode: "560103",
-    },
-
-    // 🔴 Delhi (your requested coords: 28.6455788, 77.080968)
-    {
-      name: "Seema Arora",
-      mobile: "9000000021",
-      exp: 6,
-      lat: 28.646,
-      lng: 77.0815,
-      city: "Delhi",
-      area: "Janakpuri",
-      pincode: "110058",
-    },
-    {
-      name: "Kiran Bala",
-      mobile: "9000000022",
-      exp: 4,
-      lat: 28.6448,
-      lng: 77.0799,
-      city: "Delhi",
-      area: "Tilak Nagar",
-      pincode: "110018",
-    },
-    {
-      name: "Rashmi Kapoor",
-      mobile: "9000000023",
-      exp: 7,
-      lat: 28.6472,
-      lng: 77.0821,
-      city: "Delhi",
-      area: "Rajouri Garden",
-      pincode: "110027",
-    },
-    {
-      name: "Neetu Sharma",
-      mobile: "9000000024",
-      exp: 5,
-      lat: 28.645,
-      lng: 77.083,
-      city: "Delhi",
-      area: "Janakpuri West",
-      pincode: "110058",
-    },
-    {
-      name: "Pinky Devi",
-      mobile: "9000000025",
-      exp: 8,
-      lat: 28.6465,
-      lng: 77.08,
-      city: "Delhi",
-      area: "Tilak Nagar",
-      pincode: "110018",
-    },
-    {
-      name: "Mamta Yadav",
-      mobile: "9000000026",
-      exp: 9,
-      lat: 28.6459,
-      lng: 77.0812,
-      city: "Delhi",
-      area: "Rajouri Garden",
-      pincode: "110027",
-    },
-  ];
-
-  const createdNannies = [];
-
-  for (const nanny of nannies) {
-    const user = await prisma.user.upsert({
-      where: { mobile: nanny.mobile },
-      update: {},
-      create: {
-        mobile: nanny.mobile,
-        countryCode: "+91",
-        name: nanny.name,
-        role: "NANNY",
-        isMobileVerified: true,
-
-        addresses: {
-          create: {
-            label: "Home",
-            addressLine1: `House ${getRandom(10, 200)}`,
-            addressLine2: nanny.area,
-            city: nanny.city,
-            state: nanny.city === "Delhi" ? "Delhi" : "Karnataka",
-            pincode: nanny.pincode,
-            lat: nanny.lat,
-            lng: nanny.lng,
-            isDefault: true,
-          },
-        },
-
-        nannyProfile: {
-          create: {
-            name: nanny.name,
-            mobile: nanny.mobile,
-            gender: "FEMALE",
-            status: "VERIFIED",
-            isActive: true,
-            isAvailable: true,
-            isTrainingCompleted: true,
-
-            experience: nanny.exp,
-            bio: "Experienced nanny skilled in childcare and early learning.",
-
-            languages: ["Hindi", "English"],
-            serviceTypes: ["HOURLY", "PART_TIME", "FULL_TIME"],
-            specializations: ["Infant Care", "Toddler Care"],
-            ageGroupsHandled: ["0-2 years", "2-5 years"],
-
-            hourlyRate: getRandom(200, 500),
-            dailyRate: getRandom(1500, 3000),
-            serviceRadius: 10,
-
-            workingAreas: [nanny.area],
-
-            rating: getRating(),
-            totalReviews: getRandom(10, 80),
-            ratingData: ratingData,
-
-            totalBookings: getRandom(20, 150),
-
-            documents: [
-              { type: "ID_PROOF", verified: true },
-              { type: "POLICE_VERIFICATION", verified: true },
-            ],
-
-            verifiedAt: new Date(),
-          },
-        },
-      },
-      include: {
-        nannyProfile: true,
-        addresses: true,
-      },
+  try {
+    // 1. Create the base Booking record (No nested relations)
+    const testBooking = await prisma.booking.create({
+      data: {
+        userId: "69d7749348b8e134e3796c93",
+        nannyId: "69d7749348b8e134e3796c96",
+        childrenId: "69d7749348b8e134e3796c95",
+        status: "CONFIRMED",
+        serviceType: "FULL_TIME",
+        scheduledStartTime: startDate,
+        scheduledEndTime: endDate,
+        addressLine1: "House 42, Green Avenue",
+        addressCity: "Bangalore",
+        addressState: "Karnataka",
+        addressPincode: "560102",
+        addressCountry: "IN",
+        baseAmount: 40000,
+        gstAmount: 7200,
+        totalAmount: 47200,
+        parentGoalPrompt: "I want my 3-year-old to improve their speech, learn to share with others, and develop fine motor skills for writing over the next month.",
+        aiPlanGenerated: true,
+        aiPlanGeneratedAt: new Date(),
+      }
     });
 
-    createdNannies.push(user);
-  }
+    const bookingId = testBooking.id;
 
-  return {
-    totalNannies: createdNannies.length,
-    sampleNanny: createdNannies[0],
-    timestamp: new Date().toISOString(),
-  };
+    // 2. Create the Payment
+    await prisma.payment.create({
+      data: {
+        bookingId: bookingId,
+        userId: "69d7749348b8e134e3796c93",
+        amount: 47200,
+        status: "CAPTURED",
+        capturedAt: new Date(),
+        razorpayOrderId: "order_mock_test123",
+        razorpayPaymentId: "pay_mock_test123",
+      }
+    });
+
+    // 3. Create the RequestedDailyPlan (Parent's version)
+    await prisma.requestedDailyPlan.create({
+      data: {
+        bookingId: bookingId,
+        name: "Parent's Requested Routine",
+        status: "ACTIVE",
+        childAgeMonths: 36,
+        childGender: "BOY",
+        additionalNotes: [
+          "Loves dinosaur toys", 
+          "Needs a nap at 1 PM"
+        ],
+      }
+    });
+
+    // 4. Create the ChildGoals using createMany
+    await prisma.childGoal.createMany({
+      data: [
+        {
+          bookingId: bookingId,
+          childId: "69d7749348b8e134e3796c95",
+          name: "Improve expressive language",
+          category: "COGNITIVE",
+          priority: "HIGH",
+          timelineMonths: 1,
+          parentDescription: "improve their speech",
+          milestones: [
+            { week: 2, target: "Uses 4-word sentences" },
+            { week: 4, target: "Can name 10 new animals" }
+          ]
+        },
+        {
+          bookingId: bookingId,
+          childId: "69d7749348b8e134e3796c95",
+          name: "Develop fine motor skills",
+          category: "PHYSICAL",
+          priority: "MEDIUM",
+          timelineMonths: 1,
+          parentDescription: "develop fine motor skills for writing",
+          milestones: [
+            { week: 1, target: "Holds crayon with pincer grasp" },
+            { week: 4, target: "Traces straight lines" }
+          ]
+        }
+      ]
+    });
+
+    // 5. Create the Master DailyPlan
+    await prisma.dailyPlan.create({
+      data: {
+        bookingId: bookingId,
+        childId: "69d7749348b8e134e3796c95",
+        overallStrategy: "Play-based approach focusing on verbal communication and tactile activities.",
+        weeklyFocusAreas: [
+          { week: 1, focus: "Introduction and basic speech games" },
+          { week: 2, focus: "Fine motor through clay and drawing" }
+        ],
+        difficultyLevel: "MEDIUM",
+        totalPlannedMinutes: 120,
+        rawAiResponse: { status: "Mock AI parsed output for UI testing" }
+      }
+    });
+
+    console.log("✅ Booking and all records successfully created sequentially!", bookingId);
+    return testBooking;
+
+  } catch (error) {
+    console.error("❌ Seeding failed:", error);
+  }
 };

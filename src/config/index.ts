@@ -5,6 +5,9 @@ export const config = {
   isDev: process.env.NODE_ENV !== 'production',
   port: parseInt(process.env.PORT || '3000', 10),
   mongoUri: process.env.MONGO_URI || 'mongodb://localhost:27017/nanny_app',
+  anthropic: {
+    apiKey: process.env.ANTHROPIC_API_KEY || '',
+  },
   jwt: {
     accessSecret:  process.env.JWT_ACCESS_SECRET  || 'dev_access_secret_min_32_chars_long',
     refreshSecret: process.env.JWT_REFRESH_SECRET || 'dev_refresh_secret_min_32_chars_long',

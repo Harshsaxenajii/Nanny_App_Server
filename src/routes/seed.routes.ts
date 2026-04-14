@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { runSeedLogic } from "../services/seed.service";
+import { seedTestBooking } from "../services/seed.service";
 
 const router = Router();
 
@@ -11,7 +11,7 @@ const router = Router();
 router.get("/seed", async (req, res) => {
   try {
     // Call the decoupled logic function with 0 arguments
-    const seedResult = await runSeedLogic();
+    const seedResult = await seedTestBooking();
 
     return res.status(200).json({
       success: true,

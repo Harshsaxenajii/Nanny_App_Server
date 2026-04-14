@@ -124,6 +124,7 @@ app.get("/health", (_req, res) => {
 });
 
 /* ── API Routes ─────────────────────────────────────────────────────────── */
+<<<<<<< Updated upstream
 app.use("/api/v1/pushData", seedRouter);
 app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/users", userRouter);
@@ -134,6 +135,19 @@ app.use("/api/v1/location", locationRouter);
 app.use("/api/v1/chat", chatRouter);
 app.use("/api/v1/notifications", notificationRouter);
 app.use("/api/v1/admin", adminRouter);
+=======
+app.use('/api/v1/pushData', seedRouter);
+app.use('/api/v1/auth',          authRouter);
+app.use('/api/v1/users',         userRouter);
+app.use('/api/v1/nannies',       nannyRouter);
+app.use('/api/v1/bookings',      bookingRouter);
+app.use('/api/v1/payments',      paymentRouter);
+app.use('/api/v1/location',      locationRouter);
+app.use('/api/v1/chat',          chatRouter);
+app.use('/api/v1/notifications', notificationRouter);
+app.use('/api/v1/admin',         adminRouter);
+app.use("/api/v1/goals",         goalRouter);
+>>>>>>> Stashed changes
 
 /* ── 404 + error handler ────────────────────────────────────────────────── */
 app.use(notFound);
@@ -142,6 +156,9 @@ app.use(errorHandler);
 /* ── Start ──────────────────────────────────────────────────────────────── */
 async function start() {
   registerEventHandlers();
+
+  // when?
+  startDailyPlanJob();
 
   for (let attempt = 1; attempt <= 10; attempt++) {
     try {

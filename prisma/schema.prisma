@@ -1,3 +1,37 @@
+// ═══════════════════════════════════════════════════════════════
+// schema.prisma — verified, redundancy-free
+// ═══════════════════════════════════════════════════════════════
+//
+// Data flow:
+//   Parent fills Booking.parentGoalPrompt + RequestedDailyPlan
+//   → On booking CONFIRMED, AI reads parentGoalPrompt
+//       → creates ChildGoal[] (structured goals)
+//       → creates DailyPlan  (master AI strategy)
+//   → Every morning AI reads DailyPlan + previous TaskLog[]
+//       → creates PlanTask[] for that day
+//   → Nanny sees today's PlanTask[] on dashboard
+//   → Nanny fills TaskLog per task (completion, mood, notes)
+//
+// Booking 1:1 relations (bookingId is @unique on the child table):
+//   requestedDailyPlan  — parent routine, zero AI
+//   dailyPlan           — AI master plan
+//
+// Booking 1:N relations:
+//   childGoals          — AI-parsed goals (one prompt → many goals)
+//
+// DailyPlan 1:N:
+//   tasks (PlanTask[])  — AI generates fresh each morning
+//     └─ log (TaskLog?) — nanny fills after completing the task
+//
+// Removed redundant FKs:
+//   ChildGoal.userId  → reach via booking.userId
+//   DailyPlan.userId  → reach via booking.userId
+//   PlanTask.childId  → reach via plan.childId
+//   TaskLog.planId    → reach via task.planId
+//   TaskLog.childId   → reach via task.childId (via plan.childId)
+//
+// ═══════════════════════════════════════════════════════════════
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -8,7 +42,7 @@ datasource db {
 }
 
 // ─────────────────────────────────────────────────────────────
-// ALL ENUMS
+// ENUMS
 // ─────────────────────────────────────────────────────────────
 
 enum UserRole {
@@ -116,9 +150,9 @@ enum TaskCategory {
 }
 
 enum TaskStatus {
-  PENDING // not yet acted on by nanny
-  COMPLETED // nanny marked done
-  SKIPPED // nanny marked skip (reason captured in TaskLog.nannyNote)
+  PENDING       // not yet acted on by nanny
+  COMPLETED     // nanny marked done
+  SKIPPED       // nanny marked skip (reason captured in TaskLog.nannyNote)
 }
 
 enum RequestedPlanStatus {
@@ -404,6 +438,9 @@ model Booking {
   reviewRating   Int?
   reviewComment  String?
   reviewedAt     DateTime?
+
+  // dekhna hai
+  selectedGoalIds  String[]  @default([])
 
   // ── AI input ──────────────────────────────────────────────
   // Parent writes a free-text goal here (e.g. "I want my 2-year-old

@@ -5,6 +5,8 @@ import { bus, Events } from "../utils/eventBus";
 import { calcPricing } from "../utils/pricing";
 import { paginate, paginatedResult } from "../utils/response";
 import { BookingStatus, NannyStatus } from "@prisma/client";
+import { triggerAiPlanForBooking } from "./plan.service";
+import { isSubscriptionBooking } from "../utils/goalTemplates";
 
 const log = createLogger("booking");
 
@@ -551,6 +553,13 @@ export class BookingService {
       },
     });
     log.info(`Booking ${bookingId} confirmed via payment`);
+
+    // Fire-and-forget AI trigger — only for subscription bookings (>= 30 days)
+    if (isSubscriptionBooking(booking.scheduledStartTime, booking.scheduledEndTime)) {
+      triggerAiPlanForBooking(bookingId).catch((err) => {
+        log.error(`Background AI plan trigger failed for ${bookingId}: ${err.message}`);
+      });
+    }
   }
 
   async handlePaymentFailed(bookingId: string) {
