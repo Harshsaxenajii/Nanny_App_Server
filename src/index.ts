@@ -27,7 +27,8 @@ import { errorHandler, notFound } from "./middlewares/index";
 import { seedRouter } from "./routes/seed.routes";
 import * as admin from "firebase-admin";
 
-const serviceAccount = require("../service-account.json");
+// const serviceAccount = require("../service-account.json");
+const serviceAccount = require("/etc/secrets/service-account.json");
 
 const data = admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
