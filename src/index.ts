@@ -22,10 +22,12 @@ import { locationRouter } from "./routes/location.routes";
 import { chatRouter } from "./routes/chat.routes";
 import { notificationRouter } from "./routes/notification.routes";
 import { adminRouter } from "./routes/admin.routes";
+import { startDailyPlanJob } from './jobs/dailyPlan.job';
 
 import { errorHandler, notFound } from "./middlewares/index";
 import { seedRouter } from "./routes/seed.routes";
 import * as admin from "firebase-admin";
+import { goalRouter } from "./routes/goal.routes";
 
 // const serviceAccount = require("../service-account.json");
 const serviceAccount = require("/etc/secrets/service-account.json");
@@ -124,18 +126,6 @@ app.get("/health", (_req, res) => {
 });
 
 /* ── API Routes ─────────────────────────────────────────────────────────── */
-<<<<<<< Updated upstream
-app.use("/api/v1/pushData", seedRouter);
-app.use("/api/v1/auth", authRouter);
-app.use("/api/v1/users", userRouter);
-app.use("/api/v1/nannies", nannyRouter);
-app.use("/api/v1/bookings", bookingRouter);
-app.use("/api/v1/payments", paymentRouter);
-app.use("/api/v1/location", locationRouter);
-app.use("/api/v1/chat", chatRouter);
-app.use("/api/v1/notifications", notificationRouter);
-app.use("/api/v1/admin", adminRouter);
-=======
 app.use('/api/v1/pushData', seedRouter);
 app.use('/api/v1/auth',          authRouter);
 app.use('/api/v1/users',         userRouter);
@@ -147,7 +137,6 @@ app.use('/api/v1/chat',          chatRouter);
 app.use('/api/v1/notifications', notificationRouter);
 app.use('/api/v1/admin',         adminRouter);
 app.use("/api/v1/goals",         goalRouter);
->>>>>>> Stashed changes
 
 /* ── 404 + error handler ────────────────────────────────────────────────── */
 app.use(notFound);
