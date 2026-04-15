@@ -160,10 +160,10 @@ export const S = {
     serviceType: Joi.string()
       .valid(
         "FULL_TIME",
-        "PART_TIME",
-        "BABYSITTING",
-        "OVERNIGHT",
-        "SPECIAL_NEEDS",
+          "PART_TIME",
+          "ONE_TIME",
+          "OVERNIGHT",
+          "EMERGENCY",
       )
       .required(),
     scheduledStartTime: Joi.string().isoDate().required(),
