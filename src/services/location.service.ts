@@ -223,6 +223,7 @@ export class LocationService {
         profilePhoto: true,
         serviceRadius: true,
         reservedSlot: true, // 🔥 Bring slots back into memory
+        serviceTypes:true,
         user: {
           select: {
             name: true,
@@ -299,6 +300,7 @@ export class LocationService {
       hourlyRate: nanny.hourlyRate,
       avatar: nanny.user?.profilePhoto || nanny.profilePhoto,
       distance: nanny.distance ? Number(nanny.distance.toFixed(1)) : null,
+      serviceTypes:nanny.serviceTypes,
       isOnline: true,
       isFavorite: false,
     }));
