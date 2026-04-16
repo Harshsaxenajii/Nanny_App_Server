@@ -22,12 +22,13 @@ import { locationRouter } from "./routes/location.routes";
 import { chatRouter } from "./routes/chat.routes";
 import { notificationRouter } from "./routes/notification.routes";
 import { adminRouter } from "./routes/admin.routes";
-import { startDailyPlanJob } from './jobs/dailyPlan.job';
 
 import { errorHandler, notFound } from "./middlewares/index";
 import { seedRouter } from "./routes/seed.routes";
 import * as admin from "firebase-admin";
 import { goalRouter } from "./routes/goal.routes";
+import { planRouter }           from './routes/plan.routes';
+import { registerDailyPlanJob } from './jobs/dailyPlan.job';
 
 // const serviceAccount = require("../service-account.json");
 const serviceAccount = require("/etc/secrets/service-account.json");
@@ -138,16 +139,16 @@ app.use('/api/v1/notifications', notificationRouter);
 app.use('/api/v1/admin',         adminRouter);
 app.use("/api/v1/goals",         goalRouter);
 
+// PlanRouter API
+app.use('/api/v1/plan')
+
 /* ── 404 + error handler ────────────────────────────────────────────────── */
 app.use(notFound);
-app.use(errorHandler);
+app.use(errorHandler,            planRouter);
 
 /* ── Start ──────────────────────────────────────────────────────────────── */
 async function start() {
   registerEventHandlers();
-
-  // when?
-  startDailyPlanJob();
 
   for (let attempt = 1; attempt <= 10; attempt++) {
     try {
@@ -162,6 +163,10 @@ async function start() {
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
+
+  // register jobs (AI)
+  
+  registerDailyPlanJob();
 
   httpServer.listen(config.port, () => {
     log.info(`✅ Nanny App running on port ${config.port} [${config.env}]`);

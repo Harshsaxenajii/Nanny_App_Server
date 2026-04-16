@@ -145,15 +145,9 @@ enum TaskCategory {
 }
 
 enum TaskStatus {
-<<<<<<< HEAD
-  PENDING       // not yet acted on by nanny
-  COMPLETED     // nanny marked done
-  SKIPPED       // nanny marked skip (reason captured in TaskLog.nannyNote)
-=======
   PENDING
   COMPLETED
   SKIPPED
->>>>>>> 33f7ac8a7090e88d7dca5e38778fb8b006a1e319
 }
 
 enum RequestedPlanStatus {
@@ -430,17 +424,7 @@ model Booking {
   reviewComment  String?
   reviewedAt     DateTime?
 
-<<<<<<< HEAD
-  // dekhna hai
-  selectedGoalIds  String[]  @default([])
-
-  // ── AI input ──────────────────────────────────────────────
-  // Parent writes a free-text goal here (e.g. "I want my 2-year-old
-  // to improve speech and socialise more over the next 3 months").
-  // This is the ONLY field the AI reads to produce ChildGoals + DailyPlan.
-=======
   // AI input — parent writes free-text goal prompt here
->>>>>>> 33f7ac8a7090e88d7dca5e38778fb8b006a1e319
   parentGoalPrompt String?
 
   // AI status

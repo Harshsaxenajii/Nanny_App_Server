@@ -1,292 +1,306 @@
 /**
  * ai.service.ts
  *
- * Single place for all Claude API interactions.
- * Two calls are made:
- *   1. parseGoalsAndStrategy()  — called once on booking CONFIRMED
- *      Reads parentGoalPrompt + template goals → returns ChildGoal records
- *      + the DailyPlan master strategy.
+ * Single responsibility: talk to Claude.
+ * Takes structured input, returns structured output.
+ * No DB access — that is plan.service.ts's job.
  *
- *   2. generateDailyTasks()     — called every morning by the cron job
- *      Reads DailyPlan strategy + recent TaskLogs → returns today's PlanTask[].
+ * Exposed methods:
+ *   generatePlan(input)  — called once when booking is confirmed
+ *                          returns DailyPlan strategy + Week 1-5 focus areas
+ *   generateDailyTasks(input) — called every morning by the cron job
+ *                               returns today's PlanTask[]
  */
 
-import { createLogger } from '../utils/logger';
-import { config }       from '../config';
-import type { GoalTemplate, PremiumGoal, DailyPlanSlot } from '../utils/goalTemplates';
+import Anthropic                   from '@anthropic-ai/sdk';
+import { createLogger }            from '../utils/logger';
+import { AppError }                from '../utils/AppError';
 
 const log = createLogger('ai');
 
-// ── Types returned by this service ───────────────────────────────────────────
+// ─── Re-exported types (plan.service + cron consume these) ───────────────────
 
-export interface ParsedGoal {
-  goalId:           string;   // from goal.json
-  name:             string;
-  category:         string;
-  priority:         string;
-  timelineMonths:   number;
+export interface GoalContext {
+  id:                string;
+  name:              string;
+  category:          string;
+  priority:          string;
   parentDescription: string;
-  milestones:       { month: number; milestone: string }[];
+  milestones:        { week: number; target: string }[];
+  timelineMonths:    number | null;
 }
 
-export interface MasterPlan {
+export interface GeneratePlanInput {
+  parentGoalPrompt: string;
+  childAgeMonths:   number;
+  childGender:      string;        // 'BOY' | 'GIRL' | 'OTHER'
+  bookingDays:      number;        // e.g. 35
+  goals:            GoalContext[];
+}
+
+export interface AiDailyPlan {
   overallStrategy:     string;
-  weeklyFocusAreas:    { week: number; focus: string; activities: string[] }[];
+  weeklyFocusAreas:    { week: number; focus: string }[];
   difficultyLevel:     'LOW' | 'MEDIUM' | 'HIGH';
   totalPlannedMinutes: number;
-  restWindows:         string[];
+  restWindows:         string[];   // e.g. ["12:30 PM - 1:30 PM"]
 }
 
-export interface GeneratedTask {
-  title:             string;
-  category:          string;
-  durationMinutes:   number;
-  scheduledTime:     string;   // "HH:MM"
-  difficulty:        'LOW' | 'MEDIUM' | 'HIGH';
-  description:       string;
-  materials:         string[];
-  successIndicators: string[];
-  nannyNotes:        string;
-  skipIf:            string;
-  ifTooEasy:         string;
-  ifTooHard:         string;
-  goalId?:           string;   // which goal this task serves (optional)
+export interface GenerateDailyTasksInput {
+  parentGoalPrompt:    string;
+  childAgeMonths:      number;
+  childGender:         string;
+  overallStrategy:     string;
+  weeklyFocusAreas:    { week: number; focus: string }[];
+  currentWeek:         number;     // which week of the booking we're in (1-based)
+  goals:               GoalContext[];
+  previousTaskSummary: string;     // brief summary of yesterday's completions
 }
 
-// ── Internal helper: call Claude ─────────────────────────────────────────────
-
-async function callClaude(
-  systemPrompt: string,
-  userMessage:  string,
-): Promise<string> {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method:  'POST',
-    headers: {
-      'Content-Type':      'application/json',
-      'x-api-key':         config.anthropic.apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model:      'claude-opus-4-5',
-      max_tokens: 4096,
-      system:     systemPrompt,
-      messages:   [{ role: 'user', content: userMessage }],
-    }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Claude API error ${response.status}: ${err}`);
-  }
-
-  const data = await response.json() as any;
-  return data.content?.[0]?.text ?? '';
+export interface AiTask {
+  goalId:             string;      // real ChildGoal.id — resolved inside this service
+  title:              string;
+  category:           'COGNITIVE' | 'PHYSICAL' | 'SOCIAL' | 'EMOTIONAL' | 'CREATIVE' | 'ROUTINE';
+  durationMinutes:    number;
+  scheduledTime:      string;      // "HH:MM AM/PM"
+  difficulty:         'LOW' | 'MEDIUM' | 'HIGH';
+  description:        string;
+  materials:          string[];
+  successIndicators:  string[];
+  nannyNotes:         string;
+  skipIf:             string;
+  ifTooEasy:          string;
+  ifTooHard:          string;
 }
 
-// ── Helper: safely parse JSON from Claude response ────────────────────────────
+// ─── Internal Claude response shapes (before goalIndex is resolved) ───────────
 
-function extractJson<T>(raw: string): T {
-  // Claude sometimes wraps JSON in ```json ... ``` fences — strip them
-  const cleaned = raw
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/```\s*$/i, '')
-    .trim();
-  return JSON.parse(cleaned) as T;
+interface RawAiTask extends Omit<AiTask, 'goalId'> {
+  goalIndex: number;   // Claude returns index, we resolve to real ID here
 }
 
-// ── 1. Parse goals + build master strategy ────────────────────────────────────
-
-interface ParseGoalsInput {
-  childName:          string;
-  ageMonths:          number;
-  gender:             string;
-  disabilities:       string[];
-  parentGoalPrompt:   string;          // raw free text from parent
-  selectedGoals:      PremiumGoal[];   // goals parent picked from template
-  dailyPlanSlots:     DailyPlanSlot[]; // requestedDailyPlan.additionalNotes
-  bookingDurationDays: number;
+interface RawPlanResponse {
+  dailyPlan: AiDailyPlan;
 }
 
-export interface ParseGoalsResult {
-  parsedGoals: ParsedGoal[];
-  masterPlan:  MasterPlan;
-  rawResponse: any;
+interface RawTasksResponse {
+  tasks: RawAiTask[];
 }
 
-export async function parseGoalsAndStrategy(
-  input: ParseGoalsInput,
-): Promise<ParseGoalsResult> {
-  const systemPrompt = `
-You are an expert child development AI assistant.
-Your job is to:
-1. Analyse the parent's free-text goals and the pre-selected development goals.
-2. Return structured ChildGoal records with milestones.
-3. Build a master DailyPlan strategy that a nanny can execute daily.
+// ─── Service ──────────────────────────────────────────────────────────────────
 
-You MUST respond ONLY with valid JSON. No preamble, no explanation, no markdown.
-The JSON must exactly match this structure:
-{
-  "parsedGoals": [
-    {
-      "goalId": "string — from the selectedGoals list",
-      "name": "string",
-      "category": "COGNITIVE | PHYSICAL | SOCIAL | EMOTIONAL | CREATIVE",
-      "priority": "HIGH | MEDIUM | LOW",
-      "timelineMonths": number,
-      "parentDescription": "string — what the parent said about this goal",
-      "milestones": [{ "month": number, "milestone": "string" }]
+export class AiService {
+  private client: Anthropic;
+
+  constructor() {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      throw new Error('ANTHROPIC_API_KEY is not set in environment');
     }
-  ],
-  "masterPlan": {
-    "overallStrategy": "string — plain English, 2-3 sentences",
-    "weeklyFocusAreas": [
-      { "week": number, "focus": "string", "activities": ["string"] }
+    this.client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+
+  // ── generatePlan ────────────────────────────────────────────────────────────
+  // Called once when booking is confirmed.
+  // Returns the master strategy that lives in DailyPlan for the whole booking.
+
+  async generatePlan(input: GeneratePlanInput): Promise<AiDailyPlan> {
+    log.info('Generating master plan for booking (child age: %d months)', input.childAgeMonths);
+
+    const system = `
+You are an expert early childhood development planner for a professional nanny care platform in India.
+You create structured, age-appropriate care plans that a trained nanny (not a therapist) can execute.
+
+Your output must be a single valid JSON object with no markdown, no backticks, no explanation.
+Schema:
+{
+  "dailyPlan": {
+    "overallStrategy": string,          // 2-3 sentences on the core approach
+    "weeklyFocusAreas": [               // one entry per week of the booking
+      { "week": number, "focus": string }
     ],
-    "difficultyLevel": "LOW | MEDIUM | HIGH",
-    "totalPlannedMinutes": number,
-    "restWindows": ["HH:MM-HH:MM"]
+    "difficultyLevel": "LOW" | "MEDIUM" | "HIGH",
+    "totalPlannedMinutes": number,      // total structured activity per day
+    "restWindows": string[]             // e.g. ["12:30 PM - 1:30 PM"]
   }
 }
-`.trim();
+    `.trim();
 
-  const userMessage = `
-CHILD PROFILE:
-- Name: ${input.childName}
-- Age: ${input.ageMonths} months
-- Gender: ${input.gender}
-- Disabilities: ${input.disabilities.length ? input.disabilities.join(', ') : 'None'}
-- Booking duration: ${input.bookingDurationDays} days
-
-PARENT'S GOAL DESCRIPTION (free text):
+    const user = `
+Parent's goal prompt:
 "${input.parentGoalPrompt}"
 
-SELECTED PREMIUM GOALS:
-${input.selectedGoals.map((g) => `- [${g.goalId}] ${g.name} (${g.category}): ${g.parentDescription}`).join('\n')}
+Child info:
+- Age: ${input.childAgeMonths} months
+- Gender: ${input.childGender}
+- Booking duration: ${input.bookingDays} days
 
-DAILY ROUTINE SLOTS (from requested daily plan template):
-${input.dailyPlanSlots.map((s) => `${s.time}:\n${s.tasks.map((t) => `  • ${t}`).join('\n')}`).join('\n\n')}
+Structured goals selected by parent:
+${this.formatGoals(input.goals)}
 
-Generate the parsedGoals and masterPlan JSON now.
-`.trim();
+Generate the master DailyPlan strategy now.
+The weeklyFocusAreas array must have exactly ${Math.ceil(input.bookingDays / 7)} entries (one per week).
+    `.trim();
 
-  log.info('Calling Claude: parseGoalsAndStrategy');
-  const raw = await callClaude(systemPrompt, userMessage);
+    const raw = await this.callClaude(system, user, 1024);
 
-  let parsed: { parsedGoals: ParsedGoal[]; masterPlan: MasterPlan };
-  try {
-    parsed = extractJson(raw);
-  } catch (e) {
-    log.error('Failed to parse Claude response for goals', { raw });
-    throw new Error('AI returned invalid JSON for goal parsing');
+    let parsed: RawPlanResponse;
+    try {
+      parsed = JSON.parse(raw) as RawPlanResponse;
+    } catch {
+      log.error('Claude returned invalid JSON for generatePlan:\n%s', raw);
+      throw new AppError('AI plan generation failed — invalid response format', 500);
+    }
+
+    this.validatePlan(parsed.dailyPlan);
+    return parsed.dailyPlan;
   }
 
-  return {
-    parsedGoals: parsed.parsedGoals,
-    masterPlan:  parsed.masterPlan,
-    rawResponse: parsed,
-  };
-}
+  // ── generateDailyTasks ──────────────────────────────────────────────────────
+  // Called every morning by the cron job.
+  // Returns today's tasks with real goalIds resolved.
 
-// ── 2. Generate today's tasks ─────────────────────────────────────────────────
+  async generateDailyTasks(input: GenerateDailyTasksInput): Promise<AiTask[]> {
+    log.info(
+      'Generating daily tasks (week %d, child age: %d months)',
+      input.currentWeek,
+      input.childAgeMonths,
+    );
 
-interface TaskLogSummary {
-  taskTitle:       string;
-  completionPct:   number;
-  engagementRating?: number;
-  moodRating?:      number;
-  nannyNote?:       string;
-}
-
-interface GenerateDailyTasksInput {
-  childName:         string;
-  ageMonths:         number;
-  overallStrategy:   string;
-  weeklyFocusAreas:  any[];
-  goals:             { goalId: string; name: string; category: string }[];
-  dailyPlanSlots:    DailyPlanSlot[];
-  recentTaskLogs:    TaskLogSummary[];   // last 7 days of logs
-  today:             string;            // "YYYY-MM-DD"
-  dayNumber:         number;            // which day of the subscription (1, 2, 3…)
-}
-
-export async function generateDailyTasks(
-  input: GenerateDailyTasksInput,
-): Promise<{ tasks: GeneratedTask[]; rawResponse: any }> {
-  const systemPrompt = `
-You are an expert child development AI assistant.
-Generate today's activity tasks for a nanny to execute with a child.
+    const system = `
+You are an expert early childhood development planner for a professional nanny care platform in India.
+You create daily activity schedules that a trained nanny can execute without specialist equipment.
 
 Rules:
-- Tasks must fit within the daily routine slots provided.
-- Adapt difficulty based on recent task logs (lower if engagement < 3, raise if > 4).
-- Each task must serve one of the child's active goals where possible.
-- Avoid repeating the same task from the last 3 days.
-- Output ONLY valid JSON. No preamble, no markdown.
+- Total structured activity: 120-180 minutes spread across the day.
+- Vary categories — never schedule two consecutive tasks of the same category.
+- Tasks must be ordered chronologically by scheduledTime.
+- Each task must map to exactly one goal via goalIndex (0-based index into the goals array).
+- materials, successIndicators, skipIf, ifTooEasy, ifTooHard must be specific and actionable.
+- Difficulty must match the child's current week of the booking (week ${input.currentWeek}).
 
-JSON structure:
+Your output must be a single valid JSON object with no markdown, no backticks, no explanation.
+Schema:
 {
   "tasks": [
     {
-      "title": "string",
-      "category": "COGNITIVE | PHYSICAL | SOCIAL | EMOTIONAL | CREATIVE | ROUTINE",
+      "goalIndex": number,
+      "title": string,
+      "category": "COGNITIVE" | "PHYSICAL" | "SOCIAL" | "EMOTIONAL" | "CREATIVE" | "ROUTINE",
       "durationMinutes": number,
-      "scheduledTime": "HH:MM",
-      "difficulty": "LOW | MEDIUM | HIGH",
-      "description": "string — step-by-step what the nanny should do",
-      "materials": ["string"],
-      "successIndicators": ["string"],
-      "nannyNotes": "string",
-      "skipIf": "string",
-      "ifTooEasy": "string",
-      "ifTooHard": "string",
-      "goalId": "string or null"
+      "scheduledTime": string,        // "HH:MM AM/PM" e.g. "09:00 AM"
+      "difficulty": "LOW" | "MEDIUM" | "HIGH",
+      "description": string,
+      "materials": string[],
+      "successIndicators": string[],
+      "nannyNotes": string,
+      "skipIf": string,
+      "ifTooEasy": string,
+      "ifTooHard": string
     }
   ]
 }
-`.trim();
+    `.trim();
 
-  const logsText = input.recentTaskLogs.length
-    ? input.recentTaskLogs
-        .map(
-          (l) =>
-            `- "${l.taskTitle}": ${l.completionPct}% done, engagement=${l.engagementRating ?? '?'}/5, mood=${l.moodRating ?? '?'}/5. Note: ${l.nannyNote ?? 'none'}`,
-        )
-        .join('\n')
-    : 'No recent logs yet — this is the first day.';
+    const weekFocus = input.weeklyFocusAreas.find((w) => w.week === input.currentWeek);
 
-  const userMessage = `
-CHILD: ${input.childName}, ${input.ageMonths} months old
-TODAY: ${input.today} (Day ${input.dayNumber} of subscription)
+    const user = `
+Parent's goal prompt:
+"${input.parentGoalPrompt}"
 
-OVERALL STRATEGY:
-${input.overallStrategy}
+Child info:
+- Age: ${input.childAgeMonths} months
+- Gender: ${input.childGender}
 
-WEEKLY FOCUS AREAS:
-${JSON.stringify(input.weeklyFocusAreas, null, 2)}
+Overall strategy:
+"${input.overallStrategy}"
 
-ACTIVE GOALS:
-${input.goals.map((g) => `- [${g.goalId}] ${g.name} (${g.category})`).join('\n')}
+This week's focus (Week ${input.currentWeek}):
+"${weekFocus?.focus ?? 'Continue with previous week goals'}"
 
-DAILY ROUTINE SLOTS:
-${input.dailyPlanSlots.map((s) => `${s.time}:\n${s.tasks.map((t) => `  • ${t}`).join('\n')}`).join('\n\n')}
+Previous day summary:
+"${input.previousTaskSummary || 'First day of booking — no previous data.'}"
 
-RECENT TASK PERFORMANCE (last 7 days):
-${logsText}
+Goals (use goalIndex to reference in tasks):
+${this.formatGoals(input.goals)}
 
-Generate today's tasks now.
-`.trim();
+Generate today's full task schedule now.
+    `.trim();
 
-  log.info(`Calling Claude: generateDailyTasks for day ${input.dayNumber}`);
-  const raw = await callClaude(systemPrompt, userMessage);
+    const raw = await this.callClaude(system, user, 2048);
 
-  let parsed: { tasks: GeneratedTask[] };
-  try {
-    parsed = extractJson(raw);
-  } catch (e) {
-    log.error('Failed to parse Claude response for daily tasks', { raw });
-    throw new Error('AI returned invalid JSON for daily task generation');
+    let parsed: RawTasksResponse;
+    try {
+      parsed = JSON.parse(raw) as RawTasksResponse;
+    } catch {
+      log.error('Claude returned invalid JSON for generateDailyTasks:\n%s', raw);
+      throw new AppError('AI task generation failed — invalid response format', 500);
+    }
+
+    if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
+      throw new AppError('AI returned no tasks', 500);
+    }
+
+    // Resolve goalIndex → real goalId
+    return parsed.tasks.map((t) => {
+      const goal = input.goals[t.goalIndex];
+      if (!goal) {
+        log.warn('Task "%s" has invalid goalIndex %d — goal link will be null', t.title, t.goalIndex);
+      }
+      return {
+        goalId:            goal?.id ?? '',
+        title:             t.title,
+        category:          t.category,
+        durationMinutes:   t.durationMinutes,
+        scheduledTime:     t.scheduledTime,
+        difficulty:        t.difficulty,
+        description:       t.description,
+        materials:         t.materials         ?? [],
+        successIndicators: t.successIndicators ?? [],
+        nannyNotes:        t.nannyNotes        ?? '',
+        skipIf:            t.skipIf            ?? '',
+        ifTooEasy:         t.ifTooEasy         ?? '',
+        ifTooHard:         t.ifTooHard         ?? '',
+      };
+    });
   }
 
-  return { tasks: parsed.tasks, rawResponse: parsed };
+  // ── Private helpers ─────────────────────────────────────────────────────────
+
+  private async callClaude(system: string, user: string, maxTokens: number): Promise<string> {
+    const response = await this.client.messages.create({
+      model:      'claude-opus-4-5',
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: 'user', content: user }],
+    });
+
+    const text = response.content
+      .filter((b:any) => b.type === 'text')
+      .map((b:any) => (b as { type: 'text'; text: string }).text)
+      .join('');
+
+    if (!text) {
+      throw new AppError('Claude returned an empty response', 500);
+    }
+
+    return text.trim();
+  }
+
+  private formatGoals(goals: GoalContext[]): string {
+    return goals
+      .map(
+        (g, i) =>
+          `[${i}] ${g.name} (${g.category}, ${g.priority} priority)\n` +
+          `    Parent said: "${g.parentDescription}"\n` +
+          `    Milestones: ${g.milestones.map((m) => `Week ${m.week}: ${m.target}`).join(' | ')}`,
+      )
+      .join('\n\n');
+  }
+
+  private validatePlan(plan: AiDailyPlan): void {
+    if (!plan.overallStrategy)     throw new AppError('AI plan missing overallStrategy', 500);
+    if (!plan.weeklyFocusAreas?.length) throw new AppError('AI plan missing weeklyFocusAreas', 500);
+    if (!plan.difficultyLevel)     throw new AppError('AI plan missing difficultyLevel', 500);
+    if (!plan.totalPlannedMinutes) throw new AppError('AI plan missing totalPlannedMinutes', 500);
+  }
 }
