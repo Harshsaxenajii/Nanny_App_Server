@@ -158,13 +158,7 @@ export const S = {
   createBooking: Joi.object({
     nannyId: oid(),
     serviceType: Joi.string()
-      .valid(
-        "FULL_TIME",
-          "PART_TIME",
-          "ONE_TIME",
-          "OVERNIGHT",
-          "EMERGENCY",
-      )
+      .valid("FULL_TIME", "PART_TIME", "ONE_TIME", "OVERNIGHT", "EMERGENCY")
       .required(),
     scheduledStartTime: Joi.string().isoDate().required(),
     scheduledEndTime: Joi.string().isoDate().required(),
@@ -184,6 +178,69 @@ export const S = {
         coordinates: Joi.array().items(Joi.number()).length(2),
       }),
     }).required(),
+    workingDays: Joi.array()
+      .items(
+        Joi.string().valid("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"),
+      )
+      .when("serviceType", {
+        is: Joi.string().valid(
+          "FULL_TIME",
+          "PART_TIME",
+          "MONTHLY_SUBSCRIPTION",
+        ),
+        then: Joi.required(),
+        otherwise: Joi.optional().default([]),
+      }),
+
+    dailyStartTime: Joi.string()
+      .isoDate()
+      .when("serviceType", {
+        is: Joi.string().valid(
+          "FULL_TIME",
+          "PART_TIME",
+          "MONTHLY_SUBSCRIPTION",
+        ),
+        then: Joi.required(),
+        otherwise: Joi.optional(),
+      }),
+
+    dailyEndTime: Joi.string()
+      .isoDate()
+      .when("serviceType", {
+        is: Joi.string().valid(
+          "FULL_TIME",
+          "PART_TIME",
+          "MONTHLY_SUBSCRIPTION",
+        ),
+        then: Joi.required(),
+        otherwise: Joi.optional(),
+      }),
+
+    couponCode: Joi.string().max(20).uppercase().allow("", null).optional(),
+
+    selectedGoals: Joi.array()
+      .items(
+        Joi.object({
+          name: Joi.string().required(),
+          category: Joi.string()
+            .valid(
+              "COGNITIVE",
+              "PHYSICAL",
+              "ROUTINE",
+              "SOCIAL",
+              "EMOTIONAL",
+              "CREATIVE",
+            )
+            .required(),
+          priority: Joi.string()
+            .valid("HIGH", "MEDIUM", "LOW")
+            .default("MEDIUM"),
+          parentDescription: Joi.string().required(),
+          milestones: Joi.array().default([]),
+          pricePerMonth: Joi.number().min(0).default(0),
+        }),
+      )
+      .default([]),
   }),
   cancelBooking: Joi.object({
     reason: Joi.string().min(5).max(500).required(),

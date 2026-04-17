@@ -220,10 +220,11 @@ export class LocationService {
         bio: true,
         specializations: true,
         hourlyRate: true,
+        dailyRate:true,
         profilePhoto: true,
         serviceRadius: true,
         reservedSlot: true, // 🔥 Bring slots back into memory
-        serviceTypes:true,
+        serviceTypes: true,
         user: {
           select: {
             name: true,
@@ -298,9 +299,10 @@ export class LocationService {
       description: nanny.bio,
       tags: nanny.specializations,
       hourlyRate: nanny.hourlyRate,
+      dailyRate: nanny.dailyRate,
       avatar: nanny.user?.profilePhoto || nanny.profilePhoto,
       distance: nanny.distance ? Number(nanny.distance.toFixed(1)) : null,
-      serviceTypes:nanny.serviceTypes,
+      serviceTypes: nanny.serviceTypes,
       isOnline: true,
       isFavorite: false,
     }));
