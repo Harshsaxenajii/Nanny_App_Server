@@ -133,7 +133,6 @@ router.get(
         requirements: requirements ? String(requirements).split(",") : [],
         childAgeGroup,
       });
-
       res.json(ok(matches, "Explore nannies successfully retrieved"));
     } catch (e) {
       next(e);

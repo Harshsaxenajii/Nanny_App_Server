@@ -115,12 +115,14 @@ enum MessageType {
   DOCUMENT
 }
 
+
 enum GoalCategory {
   COGNITIVE
   PHYSICAL
   SOCIAL
   EMOTIONAL
   CREATIVE
+  ROUTINE
 }
 
 enum GoalPriority {
@@ -447,10 +449,7 @@ model Booking {
   // One RequestedDayWiseDailyPlan per calendar date in the booking range.
   // Each day plan owns 1 RequestedDailyPlan with the tasks JSON.
   requestedDayWiseDailyPlan RequestedDayWiseDailyPlan[]
-
-  // One ChildCollectionOfGoals per booking.
-  // It owns N ChildGoal records (one per goal the parent selected).
-  childCollectionOfGoals ChildCollectionOfGoals[]
+  childGoals                ChildGoal[]
 
   // ── AI outputs ────────────────────────────────────────────
   dailyPlan DailyPlan[]
@@ -513,24 +512,7 @@ model RequestedDailyPlan {
   @@map("requested_daily_plans")
 }
 
-// ─────────────────────────────────────────────────────────────
-// MODEL — ChildCollectionOfGoals
-//
-// One per booking. Groups all goals the parent selected at booking time.
-// Owns N ChildGoal records.
-// ─────────────────────────────────────────────────────────────
 
-model ChildCollectionOfGoals {
-  id        String   @id @default(auto()) @map("_id") @db.ObjectId
-  bookingId String   @db.ObjectId
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  booking    Booking     @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  childGoals ChildGoal[]
-
-  @@map("child_collection_of_goals")
-}
 
 // ─────────────────────────────────────────────────────────────
 // MODELS — Payments & Chat
@@ -648,21 +630,21 @@ model AuditLog {
 // ─────────────────────────────────────────────────────────────
 
 model ChildGoal {
-  id                       String       @id @default(auto()) @map("_id") @db.ObjectId
-  childId                  String       @db.ObjectId
-  childCollectionOfGoalsId String       @db.ObjectId
-  name                     String
-  category                 GoalCategory
-  priority                 GoalPriority @default(MEDIUM)
-  timelineMonths           Int?
-  parentDescription        String
-  milestones               Json         @default("[]")
-  createdAt                DateTime     @default(now())
-  updatedAt                DateTime     @updatedAt
+  id                String       @id @default(auto()) @map("_id") @db.ObjectId
+  childId           String       @db.ObjectId
+  name              String
+  category          GoalCategory
+  priority          GoalPriority @default(MEDIUM)
+  timelineMonths    Int?
+  parentDescription String
+  milestones        Json         @default("[]")
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
-  child                  Children               @relation(fields: [childId], references: [id], onDelete: Cascade)
-  childCollectionOfGoals ChildCollectionOfGoals @relation(fields: [childCollectionOfGoalsId], references: [id], onDelete: Cascade)
-  planTasks              PlanTask[]
+  child                    Children                @relation(fields: [childId], references: [id], onDelete: Cascade)
+  planTasks                PlanTask[]
+  booking                  Booking?                @relation(fields: [bookingId], references: [id])
+  bookingId                String?                 @db.ObjectId
 
   @@map("child_goals")
 }
