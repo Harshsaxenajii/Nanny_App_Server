@@ -9,7 +9,7 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { PlanService }                             from '../services/plan.service';
+import { PlanService }                             from '../services/plan.service'
 import { runDailyPlanJob }                         from '../jobs/dailyPlan.job';
 import { auth, roles }                             from '../middlewares/index';
 import { ok }                                      from '../utils/response';

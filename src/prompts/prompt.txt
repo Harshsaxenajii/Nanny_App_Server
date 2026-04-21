@@ -1,0 +1,16 @@
+Generate a daily routine plan for a 18-month-old child in JSON format.
+
+The JSON should have this structure:
+{
+  "ageGroup": "18 months",
+  "routineTitle": "string",
+  "slots": [
+    {
+      "time": "7:00 AM",
+      "activity": "string",
+      "durationMinutes": number
+    }
+  ]
+}
+
+Return only valid JSON. No explanation. No markdown. No code blocks.
