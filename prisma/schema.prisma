@@ -81,7 +81,6 @@ enum MessageType {
   DOCUMENT
 }
 
-
 enum GoalCategory {
   COGNITIVE
   PHYSICAL
@@ -153,6 +152,12 @@ type TimeSlot {
   endTime   DateTime
   bookingId String?  @db.ObjectId
   isBlock   Boolean  @default(false)
+}
+
+type IdDoc {
+  idName  String
+  encUrl  String
+  details Json?  @default("[]")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -291,7 +296,7 @@ model Nanny {
   totalReviews        Int           @default(0)
   ratingData          Json?         @default("[]")
   totalBookings       Int           @default(0)
-  documents           Json          @default("[]")
+  documents           IdDoc[]
   verifiedAt          DateTime?
   verifiedBy          String?
   rejectionReason     String?
@@ -299,10 +304,10 @@ model Nanny {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
   reservedSlot        TimeSlot[]
-
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bookings Booking[] @relation("NannyBookings")
-  taskLogs TaskLog[]
+  idDocumentSubmitted Boolean       @default(false)
+  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings            Booking[]     @relation("NannyBookings")
+  taskLogs            TaskLog[]
 
   @@map("nannies")
 }
@@ -380,6 +385,7 @@ model Booking {
   totalAmount     Float
   razorpayOrderId String?
   paymentId       String?
+  pricingDetails  Json?
 
   // Cancellation
   cancellationReason String?
@@ -477,8 +483,6 @@ model RequestedDailyPlan {
 
   @@map("requested_daily_plans")
 }
-
-
 
 // ─────────────────────────────────────────────────────────────
 // MODELS — Payments & Chat
@@ -607,10 +611,10 @@ model ChildGoal {
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
-  child                    Children                @relation(fields: [childId], references: [id], onDelete: Cascade)
-  planTasks                PlanTask[]
-  booking                  Booking?                @relation(fields: [bookingId], references: [id])
-  bookingId                String?                 @db.ObjectId
+  child     Children   @relation(fields: [childId], references: [id], onDelete: Cascade)
+  planTasks PlanTask[]
+  booking   Booking?   @relation(fields: [bookingId], references: [id])
+  bookingId String?    @db.ObjectId
 
   @@map("child_goals")
 }

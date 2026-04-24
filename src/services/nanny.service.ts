@@ -168,6 +168,16 @@ export class NannyService {
     return paginatedResult(nannies, total, page, limit);
   }
 
+  async getMyProf(nannyId: string) {
+    const nannyDetails = await prisma.nanny.findUnique({
+      where: {
+        userId: nannyId,
+      },
+    });
+    if (!nannyDetails) throw new AppError("Nanny not found", 404);
+    return nannyDetails;
+  }
+
   /* ── GET /api/v1/nannies/:id ────────────────────────────────────────── */
   async getPublicProfile(nannyId: string) {
     const nanny = await prisma.nanny.findUnique({
@@ -216,8 +226,10 @@ export class NannyService {
     if (body.profilePhoto !== undefined) data.profilePhoto = body.profilePhoto;
     if (body.specializations !== undefined)
       data.specializations = body.specializations;
-
-    console.log(data);
+    if (body.idDocumentSubmitted !== undefined)
+      data.idDocumentSubmitted = body.idDocumentSubmitted;
+    if (body.documents !== undefined)
+      data.documents = body.documents;
 
     return prisma.nanny.update({ where: { id: nanny.id }, data });
   }

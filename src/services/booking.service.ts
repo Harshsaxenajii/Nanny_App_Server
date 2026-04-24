@@ -30,11 +30,15 @@ const CANCELLED_STATUSES = [
   BookingStatus.COMPLETED,
 ];
 
+// ═════════════════════════════════════════════════════════════════════════════
+// PRICING CONSTANTS — must stay in sync with frontend calculatePrice()
+// ═════════════════════════════════════════════════════════════════════════════
 const DAILY_RATE_HOURS = 9;
 const EMERGENCY_SURCHARGE_PER_HR = 100;
 const PLATFORM_FEE_PCT = 0.05;
 const GST_PCT = 0.05;
 const MONTHLY_WORKING_DAYS = 20;
+const MAX_SESSION_HOURS = 36; // cross-midnight sessions are ≤ 36 hrs
 
 const COUPON_CATALOGUE: Record<
   string,
@@ -46,7 +50,18 @@ const COUPON_CATALOGUE: Record<
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// PRICING ENGINE
+// CROSS-MIDNIGHT SAFE SESSION HOURS
+// Mirrors frontend calcSessionHours() exactly.
+// If endTime <= startTime (e.g. 21:00 → 03:00) we add 24 hrs.
+// ═════════════════════════════════════════════════════════════════════════════
+function calcSessionHours(startTime: Date, endTime: Date): number {
+  let diff = (endTime.getTime() - startTime.getTime()) / 3_600_000;
+  if (diff <= 0) diff += 24; // cross-midnight correction
+  return diff;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PRICING ENGINE — mirrors frontend calculatePrice() exactly
 // ═════════════════════════════════════════════════════════════════════════════
 interface PricingInput {
   serviceType: string;
@@ -86,14 +101,16 @@ export function calcPricingV2(input: PricingInput): PricingOutput {
     goalsFee = 0,
   } = input;
 
-  // Safeguard: Ensure valid dates to prevent NaN calculations
-  const safeStart = isNaN(startTime.getTime()) ? new Date() : startTime;
-  const safeEnd = isNaN(endTime.getTime()) ? new Date() : endTime;
+  // ── Safeguard: reject invalid dates ────────────────────────────────────
+  if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
+    throw new AppError(
+      "Invalid startTime or endTime passed to pricing engine",
+      500,
+    );
+  }
 
-  const sessionHours = Math.max(
-    0,
-    (safeEnd.getTime() - safeStart.getTime()) / 3_600_000,
-  );
+  // ── Cross-midnight safe session hours ──────────────────────────────────
+  const sessionHours = calcSessionHours(startTime, endTime);
 
   const isRange = ["FULL_TIME", "PART_TIME", "MONTHLY_SUBSCRIPTION"].includes(
     serviceType,
@@ -121,16 +138,21 @@ export function calcPricingV2(input: PricingInput): PricingOutput {
       baseFee = effectiveDailyRate * workingDays;
       description = `₹${effectiveDailyRate}/day × ${workingDays} days`;
     } else {
+      // Overtime — mirrors frontend exactly
       const overtimeHrs = sessionHours - DAILY_RATE_HOURS;
       const dailyCost = effectiveDailyRate + overtimeHrs * hourlyRate;
       baseFee = dailyCost * workingDays;
-      description = `(₹${effectiveDailyRate}/day + ${overtimeHrs.toFixed(1)} OT hrs × ₹${hourlyRate}/hr) × ${workingDays} days`;
+      description =
+        `(₹${effectiveDailyRate}/day + ${overtimeHrs.toFixed(1)} OT hrs × ₹${hourlyRate}/hr)` +
+        ` × ${workingDays} days`;
     }
   } else {
+    // Fallback (HOURLY, EVENT, etc.)
     baseFee = sessionHours * hourlyRate;
     description = `${sessionHours.toFixed(1)} hrs × ₹${hourlyRate}/hr`;
   }
 
+  // ── Coupon on baseFee only (never on goalsFee) ─────────────────────────
   let discount = 0;
   let appliedCode: string | null = null;
 
@@ -144,9 +166,18 @@ export function calcPricingV2(input: PricingInput): PricingOutput {
   }
 
   const discountedBase = baseFee - discount;
+
+  // ── Platform fee + GST on discountedBase only ──────────────────────────
   const platformFee = Math.round(discountedBase * PLATFORM_FEE_PCT);
   const gst = Math.round(discountedBase * GST_PCT);
   const total = discountedBase + platformFee + gst + goalsFee;
+
+  log.info(
+    `[calcPricingV2] ${serviceType} | sessionHours=${sessionHours.toFixed(2)}` +
+      ` | workingDays=${workingDays} | baseFee=₹${baseFee}` +
+      ` | discount=₹${discount} | platformFee=₹${platformFee}` +
+      ` | gst=₹${gst} | goalsFee=₹${goalsFee} | total=₹${total}`,
+  );
 
   return {
     sessionHours,
@@ -184,20 +215,48 @@ export class BookingService {
     const start = new Date(body.scheduledStartTime);
     const end = new Date(body.scheduledEndTime);
 
-    if (end <= start)
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      throw new AppError("Invalid scheduledStartTime or scheduledEndTime", 400);
+    }
+
+    // ── Cross-midnight safe time validation ─────────────────────────────
+    // Old check `end <= start` incorrectly rejects sessions like 9 PM → 3 AM.
+    // The frontend bumps endTime +1 day for cross-midnight ONE_TIME/EMERGENCY,
+    // so end > start always holds here. We additionally cap at 36 hrs to block
+    // obviously invalid payloads.
+    const sessionMs = end.getTime() - start.getTime();
+
+    if (sessionMs <= 0) {
       throw new AppError(
-        "scheduledEndTime must be after scheduledStartTime",
+        "scheduledEndTime must be after scheduledStartTime. " +
+          "For sessions crossing midnight (e.g. 9 PM → 3 AM), " +
+          "the end time must be sent as the following calendar day.",
         400,
       );
-    if (start <= new Date())
+    }
+
+    //-------------------------------------------------------------------------------check this why it is breaking-------------------------------------------------------------------------------------
+    // console.log(body.serviceType)
+    // if (sessionMs > MAX_SESSION_HOURS * 3_600_000 || body.serviceType === "FULL_TIME") {
+    //   throw new AppError(
+    //     `Booking session cannot exceed ${MAX_SESSION_HOURS} hours. ` +
+    //       "Please check your start and end times.",
+    //     400,
+    //   );
+    // }
+    //-------------------------------------------------------------------------------check this why it is breaking-------------------------------------------------------------------------------------
+
+    if (start <= new Date()) {
       throw new AppError("scheduledStartTime must be in the future", 400);
+    }
 
     const child = await prisma.children.findUnique({
       where: { id: body.childrenId },
     });
     if (!child) throw new AppError("Child not found", 404);
-    if (child.userId !== userId)
+    if (child.userId !== userId) {
       throw new AppError("This child does not belong to your account", 403);
+    }
 
     let nannyId: string | null = null;
     let nanny: any = null;
@@ -205,20 +264,24 @@ export class BookingService {
     if (body.nannyId) {
       nanny = await prisma.nanny.findUnique({ where: { id: body.nannyId } });
       if (!nanny) throw new AppError("The specified nanny was not found", 404);
-      if (nanny.status !== NannyStatus.VERIFIED)
+      if (nanny.status !== NannyStatus.VERIFIED) {
         throw new AppError(
           "This nanny is not currently verified and cannot accept bookings",
           400,
         );
-      if (!nanny.isAvailable)
+      }
+      if (!nanny.isAvailable) {
         throw new AppError("This nanny is currently not available", 400);
-      if (!nanny.isActive)
+      }
+      if (!nanny.isActive) {
         throw new AppError("This nanny account is not active", 400);
-      if (!nanny.serviceTypes.includes(body.serviceType))
+      }
+      if (!nanny.serviceTypes.includes(body.serviceType)) {
         throw new AppError(
           `This nanny does not offer ${body.serviceType}.`,
           400,
         );
+      }
       nannyId = nanny.id;
     }
 
@@ -230,12 +293,15 @@ export class BookingService {
     const selectedGoals: any[] = Array.isArray(body.selectedGoals)
       ? body.selectedGoals
       : [];
+
+    // goalsFee: backend reads pricePerMonth (set by frontend payload builder)
     const goalsFee = selectedGoals.reduce(
       (sum: number, g: any) => sum + (Number(g.pricePerMonth) || 0),
       0,
     );
 
-    // FIX 2: Bulletproof Timezone Day Counting (Strict UTC Date String parsing)
+    // ── Working days: enumerate actual calendar dates (UTC-safe) ─────────
+    // Mirrors frontend countWorkingDays() exactly.
     let billingWorkingDays = MONTHLY_WORKING_DAYS;
     const isRange = ["FULL_TIME", "PART_TIME", "MONTHLY_SUBSCRIPTION"].includes(
       body.serviceType,
@@ -262,9 +328,9 @@ export class BookingService {
       );
 
       let count = 0;
+      // Use noon UTC to avoid DST boundary issues crossing date lines
       const startStr = start.toISOString().split("T")[0];
       const endStr = end.toISOString().split("T")[0];
-
       const cur = new Date(`${startStr}T12:00:00.000Z`);
       const ceil = new Date(`${endStr}T23:59:59.999Z`);
 
@@ -275,6 +341,9 @@ export class BookingService {
       billingWorkingDays = count > 0 ? count : MONTHLY_WORKING_DAYS;
     }
 
+    // ── Shift times for range bookings ────────────────────────────────────
+    // For FULL_TIME / PART_TIME the daily window comes from dailyStartTime /
+    // dailyEndTime. For single-day types we use scheduledStart/End directly.
     let shiftStart = start;
     let shiftEnd = end;
 
@@ -287,31 +356,34 @@ export class BookingService {
       }
     }
 
-    // ── STRICT DB VALIDATION ──
+    // ── Nanny rate validation ─────────────────────────────────────────────
     if (!nanny?.hourlyRate || nanny.hourlyRate <= 0) {
       throw new AppError(
-        "This nanny does not have a valid hourly rate configured in the database. Please update the nanny profile.",
+        "This nanny does not have a valid hourly rate configured. " +
+          "Please update the nanny profile before accepting bookings.",
         400,
       );
     }
-    console.log(
-      "data for calc price",
-      body.serviceType,
-      nanny.hourlyRate, // Strictly fetched from DB
 
-      nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null, // Strictly fetched from DB
-      shiftStart,
-      shiftEnd,
-      billingWorkingDays,
-      body.couponCode,
-      goalsFee,
+    // ── Parity debug: log inputs so frontend vs backend diff is instant ───
+    const expectedSessionHrs = calcSessionHours(shiftStart, shiftEnd);
+    log.info(
+      `[BOOKING_PRICING_INPUTS] serviceType=${body.serviceType}` +
+        ` | shiftStart=${shiftStart.toISOString()}` +
+        ` | shiftEnd=${shiftEnd.toISOString()}` +
+        ` | expectedSessionHrs=${expectedSessionHrs.toFixed(2)}` +
+        ` | hourlyRate=₹${nanny.hourlyRate}` +
+        ` | dailyRate=${nanny.dailyRate ?? "null"}` +
+        ` | billingWorkingDays=${billingWorkingDays}` +
+        ` | couponCode=${body.couponCode ?? "none"}` +
+        ` | goalsFee=₹${goalsFee}`,
     );
-    // Default to 600 if DB is empty, exactly like frontend
+
     const pricing = calcPricingV2({
       serviceType: body.serviceType,
-      hourlyRate: nanny.hourlyRate, // Strictly fetched from DB
+      hourlyRate: nanny.hourlyRate,
       dailyRate:
-        nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null, // Strictly fetched from DB
+        nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null,
       startTime: shiftStart,
       endTime: shiftEnd,
       workingDays: billingWorkingDays,
@@ -320,7 +392,7 @@ export class BookingService {
     });
 
     const addr = body.address;
-    const coords = addr.coordinates?.coordinates;
+    const coords = addr?.coordinates?.coordinates;
 
     const requestedTasks = Array.isArray(body.requestedTasks)
       ? body.requestedTasks.map((t: string) => ({
@@ -340,19 +412,33 @@ export class BookingService {
         specialInstructions: body.specialInstructions ?? null,
         childrenId: body.childrenId,
         requestedTasks,
-        addressLabel: addr.label ?? null,
-        addressLine1: addr.addressLine1,
-        addressLine2: addr.addressLine2 ?? null,
-        addressCity: addr.city,
-        addressState: addr.state,
-        addressPincode: addr.pincode,
-        addressCountry: addr.country ?? "IN",
+        addressLabel: addr?.label ?? null,
+        addressLine1: addr?.addressLine1 ?? "",
+        addressLine2: addr?.addressLine2 ?? null,
+        addressCity: addr?.city ?? "",
+        addressState: addr?.state ?? "",
+        addressPincode: addr?.pincode ?? "",
+        addressCountry: addr?.country ?? "IN",
         addressLat: coords ? coords[1] : null,
         addressLng: coords ? coords[0] : null,
         baseAmount: pricing.baseFee,
         gstAmount: pricing.gst,
         totalAmount: pricing.total,
         status: BookingStatus.PENDING_PAYMENT,
+        pricingDetails: {
+          sessionHours: pricing.sessionHours,
+          workingDays: pricing.workingDays,
+          description: pricing.description,
+          baseFee: pricing.baseFee,
+          emergencySurcharge: pricing.emergencySurcharge,
+          couponCode: pricing.couponCode,
+          discount: pricing.discount,
+          discountedBase: pricing.discountedBase,
+          platformFee: pricing.platformFee,
+          gst: pricing.gst,
+          goalsFee: pricing.goalsFee,
+          total: pricing.total,
+        },
         timeline: appendTimeline(
           [],
           BookingStatus.PENDING_PAYMENT,
@@ -362,6 +448,7 @@ export class BookingService {
       include: { children: true },
     });
 
+    // ── Day-wise plan creation ─────────────────────────────────────────────
     const taskStrings: string[] = Array.isArray(body.requestedTasks)
       ? body.requestedTasks
       : [];
@@ -401,6 +488,7 @@ export class BookingService {
         cur.setUTCDate(cur.getUTCDate() + 1);
       }
     } else {
+      // Single-day booking: one plan for the booking date
       const d = new Date(start);
       d.setUTCHours(0, 0, 0, 0);
       planDates.push(d);
@@ -412,7 +500,6 @@ export class BookingService {
           const dayPlan = await prisma.requestedDayWiseDailyPlan.create({
             data: { bookingId: booking.id, date: planDate },
           });
-
           await prisma.requestedDailyPlan.create({
             data: {
               requestedDayWiseDailyPlanId: dayPlan.id,
@@ -425,6 +512,7 @@ export class BookingService {
       );
     }
 
+    // ── Goals ─────────────────────────────────────────────────────────────
     if (selectedGoals.length > 0) {
       await Promise.all(
         selectedGoals.map((g: any) =>
@@ -447,13 +535,10 @@ export class BookingService {
     bus.emit(Events.BOOKING_CREATED, { bookingId: booking.id, userId });
     log.info(`Booking created: ${booking.id} | total: ₹${pricing.total}`);
 
-    return {
-      ...booking,
-      pricing,
-    };
+    return { ...booking, pricing };
   }
 
-  /* ── POST /api/v1/bookings/markTaskDone ───────────────────────────────────────────── */
+  /* ── POST /api/v1/bookings/markTaskDone ──────────────────────────────── */
   async markTaskDone(nannyUserId: string, bookingId: string, taskName: string) {
     const nanny = await prisma.nanny.findUnique({
       where: { userId: nannyUserId },
@@ -465,22 +550,25 @@ export class BookingService {
     });
     if (!booking) throw new AppError("Booking not found", 404);
 
-    if (booking.nannyId !== nanny.id)
+    if (booking.nannyId !== nanny.id) {
       throw new AppError("You are not assigned to this booking", 403);
-
-    if (booking.status !== BookingStatus.IN_PROGRESS)
+    }
+    if (booking.status !== BookingStatus.IN_PROGRESS) {
       throw new AppError(
         "Tasks can only be marked done when booking is in progress",
         400,
       );
+    }
 
     const tasks = (booking.requestedTasks as any[]) ?? [];
     const taskIndex = tasks.findIndex((t) => t.task === taskName);
 
-    if (taskIndex === -1)
+    if (taskIndex === -1) {
       throw new AppError(`Task "${taskName}" not found in this booking`, 404);
-    if (tasks[taskIndex].isDone)
+    }
+    if (tasks[taskIndex].isDone) {
       throw new AppError(`Task "${taskName}" is already marked as done`, 400);
+    }
 
     tasks[taskIndex] = {
       ...tasks[taskIndex],
@@ -505,11 +593,12 @@ export class BookingService {
     let nannyId: string | undefined;
     if (role === "NANNY") {
       const nanny = await prisma.nanny.findUnique({ where: { userId } });
-      if (!nanny)
+      if (!nanny) {
         throw new AppError(
           "Nanny profile not found. Please register as a nanny first.",
           404,
         );
+      }
       nannyId = nanny.id;
     }
 
@@ -563,9 +652,11 @@ export class BookingService {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
       include: {
+        // Keep user info for reference (though not strictly rendered in this specific UI)
         user: {
           select: { id: true, name: true, mobile: true, profilePhoto: true },
         },
+        // Keep exact Nanny details needed for the profile card
         nanny: {
           select: {
             id: true,
@@ -575,7 +666,15 @@ export class BookingService {
             rating: true,
           },
         },
-        payment: true,
+        // Only fetch the specific fields rendered in the User Selected Goals card
+        childGoals: {
+          select: {
+            id: true,
+            category: true,
+            name: true,
+            parentDescription: true,
+          },
+        },
       },
     });
     if (!booking) throw new AppError("Booking not found", 404);
@@ -587,8 +686,9 @@ export class BookingService {
     if (!isOwner && !isAdmin) {
       const nanny = await prisma.nanny.findUnique({ where: { userId } });
       isNanny = !!nanny && booking.nannyId === nanny.id;
-      if (!isNanny)
+      if (!isNanny) {
         throw new AppError("You do not have access to this booking", 403);
+      }
     }
     return booking;
   }
@@ -619,11 +719,12 @@ export class BookingService {
     if (!isOwner && !isAdmin) {
       const nanny = await prisma.nanny.findUnique({ where: { userId } });
       isNanny = !!nanny && booking.nannyId === nanny.id;
-      if (!isNanny)
+      if (!isNanny) {
         throw new AppError(
           "You do not have permission to cancel this booking",
           403,
         );
+      }
     }
 
     const status: BookingStatus = isAdmin
@@ -655,8 +756,9 @@ export class BookingService {
 
     const nanny = await prisma.nanny.findUnique({ where: { userId } });
     if (!nanny) throw new AppError("Nanny profile not found", 404);
-    if (booking.nannyId !== nanny.id)
+    if (booking.nannyId !== nanny.id) {
       throw new AppError("This booking is not assigned to you", 403);
+    }
 
     if (booking.status !== BookingStatus.CONFIRMED) {
       throw new AppError(
@@ -687,8 +789,9 @@ export class BookingService {
 
     const nanny = await prisma.nanny.findUnique({ where: { userId } });
     if (!nanny) throw new AppError("Nanny profile not found", 404);
-    if (booking.nannyId !== nanny.id)
+    if (booking.nannyId !== nanny.id) {
       throw new AppError("This booking is not assigned to you", 403);
+    }
 
     if (booking.status !== BookingStatus.NANNY_ASSIGNED) {
       throw new AppError(
@@ -720,8 +823,9 @@ export class BookingService {
 
     const nanny = await prisma.nanny.findUnique({ where: { userId } });
     if (!nanny) throw new AppError("Nanny profile not found", 404);
-    if (booking.nannyId !== nanny.id)
+    if (booking.nannyId !== nanny.id) {
       throw new AppError("This booking is not assigned to you", 403);
+    }
 
     if (booking.status !== BookingStatus.IN_PROGRESS) {
       throw new AppError(
@@ -768,20 +872,24 @@ export class BookingService {
       where: { id: bookingId },
     });
     if (!booking) throw new AppError("Booking not found", 404);
-    if (booking.userId !== userId)
+    if (booking.userId !== userId) {
       throw new AppError(
         "Only the user who made this booking can submit a review",
         403,
       );
-    if (booking.status !== BookingStatus.COMPLETED)
+    }
+    if (booking.status !== BookingStatus.COMPLETED) {
       throw new AppError("You can only review a completed booking", 400);
-    if (booking.reviewRating !== null)
+    }
+    if (booking.reviewRating !== null) {
       throw new AppError(
         "A review has already been submitted for this booking",
         400,
       );
-    if (!booking.nannyId)
+    }
+    if (!booking.nannyId) {
       throw new AppError("No nanny was assigned to this booking", 400);
+    }
 
     const updated = await prisma.booking.update({
       where: { id: bookingId },
@@ -865,8 +973,9 @@ export class BookingService {
     ];
     const where: any = {};
     if (query.status) {
-      if (!valid.includes(query.status as BookingStatus))
+      if (!valid.includes(query.status as BookingStatus)) {
         throw new AppError(`Invalid status '${query.status}'`, 400);
+      }
       where.status = query.status as BookingStatus;
     }
     if (query.userId) where.userId = query.userId;
@@ -897,11 +1006,12 @@ export class BookingService {
     });
     if (!booking) throw new AppError("Booking not found", 404);
 
-    if (CANCELLED_STATUSES.includes(booking.status))
+    if (CANCELLED_STATUSES.includes(booking.status)) {
       throw new AppError(
         `Booking is already in a terminal state: ${booking.status}`,
         400,
       );
+    }
 
     const updated = await prisma.booking.update({
       where: { id: bookingId },

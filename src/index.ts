@@ -22,13 +22,14 @@ import { locationRouter } from "./routes/location.routes";
 import { chatRouter } from "./routes/chat.routes";
 import { notificationRouter } from "./routes/notification.routes";
 import { adminRouter } from "./routes/admin.routes";
+import { uploadRouter } from "./routes/uploadImages.routes";
 
 import { errorHandler, notFound } from "./middlewares/index";
 import { seedRouter } from "./routes/seed.routes";
 import * as admin from "firebase-admin";
 
 // const serviceAccount = require("../service-account.json");
-const serviceAccount = require("/etc/secrets/service-account.json");
+const serviceAccount = require("../service-account.json");
 
 const data = admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -134,6 +135,8 @@ app.use("/api/v1/location", locationRouter);
 app.use("/api/v1/chat", chatRouter);
 app.use("/api/v1/notifications", notificationRouter);
 app.use("/api/v1/admin", adminRouter);
+app.use("/api/v1/admin", adminRouter);
+app.use("/api/v1/encrypted", uploadRouter);
 
 /* ── 404 + error handler ────────────────────────────────────────────────── */
 app.use(notFound);
