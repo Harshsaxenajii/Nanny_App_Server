@@ -204,11 +204,6 @@ export const runSeedLogic = async () => {
 
             totalBookings: getRandom(20, 150),
 
-            documents: [
-              { type: "ID_PROOF", verified: true },
-              { type: "POLICE_VERIFICATION", verified: true },
-            ],
-
             verifiedAt: new Date(),
           },
         },
