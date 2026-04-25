@@ -15,6 +15,21 @@ async function findNannyByUserOrFail(userId: string) {
     );
   return nanny;
 }
+import { BookingStatus } from "@prisma/client";
+
+const UPCOMING_STATUSES: BookingStatus[] = [
+  BookingStatus.PENDING_PAYMENT,
+  BookingStatus.CONFIRMED,
+  BookingStatus.NANNY_ASSIGNED,
+  BookingStatus.IN_PROGRESS,
+];
+
+const PAST_STATUSES: BookingStatus[] = [
+  BookingStatus.COMPLETED,
+  BookingStatus.CANCELLED_BY_USER,
+  BookingStatus.CANCELLED_BY_NANNY,
+  BookingStatus.CANCELLED_BY_ADMIN,
+];
 
 export class NannyService {
   /* ── POST /api/v1/nannies/register (no auth — creates user + nanny) ── */
@@ -228,8 +243,7 @@ export class NannyService {
       data.specializations = body.specializations;
     if (body.idDocumentSubmitted !== undefined)
       data.idDocumentSubmitted = body.idDocumentSubmitted;
-    if (body.documents !== undefined)
-      data.documents = body.documents;
+    if (body.documents !== undefined) data.documents = body.documents;
 
     return prisma.nanny.update({ where: { id: nanny.id }, data });
   }
@@ -263,23 +277,57 @@ export class NannyService {
   async getMyBookings(userId: string, query: any) {
     const nanny = await findNannyByUserOrFail(userId);
     const { page, limit, skip } = paginate(query);
+
     const where: any = { nannyId: nanny.id };
-    if (query.status) where.status = query.status;
+
+    // ── Tab filter (primary) ──────────────────────────────────────────────────
+    if (query.tab === "upcoming") {
+      where.status = { in: UPCOMING_STATUSES };
+    } else if (query.tab === "past") {
+      where.status = { in: PAST_STATUSES };
+    }
+
+    // ── Granular status override (optional, e.g. ?status=CONFIRMED) ──────────
+    if (query.status) {
+      where.status = query.status as BookingStatus;
+    }
+
+    // ── Service type filter ───────────────────────────────────────────────────
+    if (query.serviceType) {
+      where.serviceType = query.serviceType;
+    }
+
+    // ── Date range filter (optional) ─────────────────────────────────────────
+    if (query.from || query.to) {
+      where.scheduledStartTime = {};
+      if (query.from) where.scheduledStartTime.gte = new Date(query.from);
+      if (query.to) where.scheduledStartTime.lte = new Date(query.to);
+    }
+
+    // Upcoming: nearest first. Past: most recent first.
+    const orderBy =
+      query.tab === "upcoming"
+        ? { scheduledStartTime: "asc" as const }
+        : { scheduledStartTime: "desc" as const };
 
     const [bookings, total] = await Promise.all([
       prisma.booking.findMany({
         where,
         skip,
         take: limit,
-        orderBy: { scheduledStartTime: "desc" },
+        orderBy,
         include: {
           user: {
             select: { id: true, name: true, mobile: true, profilePhoto: true },
+          },
+          children: {
+            select: { id: true, name: true, gender: true, birthDate: true },
           },
         },
       }),
       prisma.booking.count({ where }),
     ]);
+
     return paginatedResult(bookings, total, page, limit);
   }
 }

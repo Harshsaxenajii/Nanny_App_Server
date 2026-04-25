@@ -157,7 +157,7 @@ type TimeSlot {
 type IdDoc {
   idName  String?
   encUrl  String?
-  details Json?  @default("[]")
+  details Json?   @default("[]")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -354,6 +354,33 @@ model Children {
 //   Booking → ChildCollectionOfGoals (1:N)
 //           → ChildGoal              (1:N, one per selected goal)
 // ─────────────────────────────────────────────────────────────
+model AttendanceRecord {
+  id            String           @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId     String           @db.ObjectId
+  nannyId       String           @db.ObjectId
+  userId        String           @db.ObjectId // parent, for quick lookup
+  scheduledDate DateTime // midnight UTC of the working day
+  clockInAt     DateTime? // when nanny tapped "Start shift"
+  clockOutAt    DateTime? // when nanny tapped "End shift"
+  status        AttendanceStatus @default(PENDING)
+  lateMinutes   Int              @default(0) // minutes after scheduled start
+  notes         String? // nanny or admin note
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@unique([bookingId, scheduledDate], name: "bookingId_scheduledDate")
+  @@map("attendance_records")
+}
+
+enum AttendanceStatus {
+  PENDING // scheduled but shift hasn't started yet
+  PRESENT // clocked in and out
+  ABSENT // never clocked in (set by nightly cron or admin)
+  LATE // clocked in > 15 min after scheduledStartTime
+  HALF_DAY // clocked out < 50% of expected hours
+}
 
 model Booking {
   id                  String        @id @default(auto()) @map("_id") @db.ObjectId
@@ -424,7 +451,9 @@ model Booking {
   childGoals                ChildGoal[]
 
   // ── AI outputs ────────────────────────────────────────────
-  dailyPlan DailyPlan[]
+  dailyPlan         DailyPlan[]
+  attendanceRecords AttendanceRecord[]
+  workingDays       String[]           @default([])
 
   @@map("bookings")
 }
