@@ -277,4 +277,17 @@ router.get(
   },
 );
 
+router.patch("/:id/reject", auth, roles("NANNY"), async (req, res, next) => {
+  try {
+    const result = await service.rejectBooking(
+      req.params.id,
+      req.user!.userId,
+      req.body.reason,
+    );
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export { router as bookingRouter };

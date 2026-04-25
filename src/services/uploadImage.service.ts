@@ -9,7 +9,7 @@ export interface MulterFile {
 
 dotenv.config();
 
-const supabaseUrl = process.env.SUPABASE_URL as string;
+const supabaseUrl = process.env.SUPABASE_URL as string; 
 const supabaseKey = process.env.SUPABASE_ANON_KEY as string;
 const encryptionKey = process.env.ENCRYPTION_KEY as string;
 const bucketName = process.env.SUPABASE_BUCKET as string;

@@ -10,14 +10,14 @@ const log = createLogger("booking");
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS  (keep in sync with frontend)
 // ─────────────────────────────────────────────────────────────────────────────
-const LATE_THRESHOLD_MINUTES = 15; // clock-in > 15 min after scheduled → LATE
-const HALF_DAY_THRESHOLD_PCT = 0.5; // clocked < 50% of expected hours → HALF_DAY
+const LATE_THRESHOLD_MINUTES = 15;
+const HALF_DAY_THRESHOLD_PCT = 0.5;
 const DAILY_RATE_HOURS = 9;
 const EMERGENCY_SURCHARGE_PER_HR = 100;
 const PLATFORM_FEE_PCT = 0.05;
 const GST_PCT = 0.05;
 const MONTHLY_WORKING_DAYS = 20;
-const MAX_SESSION_HOURS = 36; // absolute cap for single-session validation
+const MAX_SESSION_HOURS = 36;
 
 const RANGE_TYPES = ["FULL_TIME", "PART_TIME", "MONTHLY_SUBSCRIPTION"] as const;
 const SINGLE_DAY_TYPES = ["ONE_TIME", "OVERNIGHT", "EMERGENCY"] as const;
@@ -98,7 +98,6 @@ async function seedAttendanceRecords(
   const isRange = RANGE_TYPES.includes(booking.serviceType as any);
 
   if (!isRange) {
-    // Single session → one row for the booking date
     const date = new Date(booking.scheduledStartTime);
     date.setUTCHours(0, 0, 0, 0);
 
@@ -116,7 +115,6 @@ async function seedAttendanceRecords(
     return { seeded: 1 };
   }
 
-  // Range → enumerate every working day between scheduledStartTime and scheduledEndTime
   const DAY_MAP: Record<string, number> = {
     MON: 1,
     TUE: 2,
@@ -127,7 +125,6 @@ async function seedAttendanceRecords(
     SUN: 0,
   };
 
-  // workingDays is stored as String[] on the Booking (e.g. ["MON","TUE","WED"])
   const workingDayNames: string[] = (booking as any).workingDays ?? [];
   const activeDayNums = new Set(
     workingDayNames.map((d) => DAY_MAP[d.toUpperCase().trim()] ?? -1),
@@ -135,12 +132,11 @@ async function seedAttendanceRecords(
 
   const startStr = booking.scheduledStartTime.toISOString().split("T")[0];
   const endStr = booking.scheduledEndTime.toISOString().split("T")[0];
-  const cur = new Date(`${startStr}T12:00:00.000Z`); // noon UTC avoids DST issues
+  const cur = new Date(`${startStr}T12:00:00.000Z`);
   const ceil = new Date(`${endStr}T23:59:59.999Z`);
 
   const dates: Date[] = [];
   while (cur <= ceil) {
-    // If no workingDays stored, seed all days in the range
     if (activeDayNums.size === 0 || activeDayNums.has(cur.getUTCDay())) {
       const d = new Date(cur);
       d.setUTCHours(0, 0, 0, 0);
@@ -170,7 +166,7 @@ async function seedAttendanceRecords(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PRICING ENGINE  (mirrors frontend calculatePrice exactly)
+// PRICING ENGINE
 // ─────────────────────────────────────────────────────────────────────────────
 interface PricingInput {
   serviceType: string;
@@ -320,7 +316,6 @@ export class BookingService {
         400,
       );
 
-    // Only cap session length for single-day bookings
     if (!isRangeType && sessionMs > MAX_SESSION_HOURS * 3_600_000)
       throw new AppError(
         `Session cannot exceed ${MAX_SESSION_HOURS} hours.`,
@@ -368,7 +363,6 @@ export class BookingService {
       0,
     );
 
-    // Working days enumeration (UTC-safe, mirrors frontend countWorkingDays)
     let billingWorkingDays = MONTHLY_WORKING_DAYS;
     if (
       isRangeType &&
@@ -401,8 +395,6 @@ export class BookingService {
       billingWorkingDays = count > 0 ? count : MONTHLY_WORKING_DAYS;
     }
 
-    // Shift times: dailyStartTime / dailyEndTime only exist on the request body.
-    // The Booking model only has scheduledStartTime / scheduledEndTime.
     let shiftStart = start;
     let shiftEnd = end;
     if (isRangeType && body.dailyStartTime && body.dailyEndTime) {
@@ -575,7 +567,6 @@ export class BookingService {
   }
 
   // ── POST /api/v1/bookings/:bookingId/tasks/:taskName/done ────────────────
-  // Marks a requestedTask (the parent-selected simple task string) as done.
   async markTaskDone(nannyUserId: string, bookingId: string, taskName: string) {
     const nanny = await prisma.nanny.findUnique({
       where: { userId: nannyUserId },
@@ -613,7 +604,6 @@ export class BookingService {
   }
 
   // ── PATCH /api/v1/bookings/:id/daily-plan/task/:taskId ───────────────────
-  // Updates the status of an AI-generated PlanTask (model: PlanTask in schema).
   async updatePlanTask(
     nannyUserId: string,
     bookingId: string,
@@ -637,7 +627,6 @@ export class BookingService {
         400,
       );
 
-    // PlanTask is a top-level model — look it up directly and verify it belongs here
     const task = await prisma.planTask.findUnique({
       where: { id: taskId },
       include: { plan: true },
@@ -662,7 +651,6 @@ export class BookingService {
       data: { status: body.status as any, updatedAt: new Date() },
     });
 
-    // Optionally upsert a TaskLog with nanny notes
     if (body.notes) {
       await prisma.taskLog.upsert({
         where: { taskId },
@@ -680,7 +668,6 @@ export class BookingService {
       });
     }
 
-    // Append to booking timeline so parent can see task activity
     await prisma.booking.update({
       where: { id: bookingId },
       data: {
@@ -747,7 +734,6 @@ export class BookingService {
     };
 
     if (query.status) {
-      // Specific status requested — simple query, no re-ordering needed
       const [bookings, total] = await Promise.all([
         prisma.booking.findMany({
           where: baseWhere,
@@ -761,7 +747,6 @@ export class BookingService {
       return paginatedResult(bookings, total, page, limit);
     }
 
-    // No status filter → fetch IN_PROGRESS first, then the rest (excluding IN_PROGRESS)
     const [inProgress, others, total] = await Promise.all([
       prisma.booking.findMany({
         where: { ...baseWhere, status: BookingStatus.IN_PROGRESS },
@@ -771,17 +756,17 @@ export class BookingService {
       prisma.booking.findMany({
         where: { ...baseWhere, status: { not: BookingStatus.IN_PROGRESS } },
         skip,
-        take: Math.max(0, limit - 0), // full page for non-in-progress
+        take: Math.max(0, limit - 0),
         orderBy: { createdAt: "desc" },
         include,
       }),
       prisma.booking.count({ where: baseWhere }),
     ]);
 
-    // Merge: IN_PROGRESS on top, rest below, respecting the page limit
     const merged = [...inProgress, ...others].slice(skip, skip + limit);
     return paginatedResult(merged, total, page, limit);
   }
+
   // ── GET /api/v1/bookings/:id ─────────────────────────────────────────────
   async getBookingById(bookingId: string, userId: string, role: string) {
     const booking = await prisma.booking.findUnique({
@@ -799,7 +784,6 @@ export class BookingService {
             rating: true,
           },
         },
-        childGoals: true,
         dailyPlan: { include: { tasks: true } },
         requestedDayWiseDailyPlan: { include: { requestedDailyPlan: true } },
         attendanceRecords: { orderBy: { scheduledDate: "asc" } },
@@ -894,12 +878,125 @@ export class BookingService {
     });
   }
 
-  // ── PATCH /api/v1/bookings/:id/start ─────────────────────────────────────
+  // ── PATCH /api/v1/bookings/:id/confirm ───────────────────────────────────
+  // Called by the nanny when they tap Accept on the booking request notification.
+  // This is the NEW notification-driven confirm — distinct from acceptBooking
+  // (which requires NANNY_ASSIGNED; this works from CONFIRMED status i.e.
+  // right after payment, before the nanny has explicitly accepted in-app).
   //
-  // ONE_TIME / OVERNIGHT / EMERGENCY  → must be NANNY_ASSIGNED → moves to IN_PROGRESS once
-  // FULL_TIME / PART_TIME / MONTHLY   → can be CONFIRMED | NANNY_ASSIGNED | IN_PROGRESS
-  //   First call stamps actualStartTime and moves to IN_PROGRESS.
-  //   Subsequent calls (each morning) only upsert today's attendance row.
+  // Flow:
+  //   User pays → CONFIRMED → FCM sent to nanny
+  //   Nanny taps Accept (overlay or notification action) → PATCH /:id/confirm
+  //   Status moves CONFIRMED → NANNY_ASSIGNED
+  //   bus.emit BOOKING_CONFIRMED → FCM sent to user → user redirected to payment receipt
+  async confirmBooking(bookingId: string, nannyUserId: string) {
+    const nanny = await prisma.nanny.findUnique({ where: { userId: nannyUserId } });
+    if (!nanny) throw new AppError("Nanny profile not found", 404);
+
+    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new AppError("Booking not found", 404);
+
+    if (booking.nannyId !== nanny.id)
+      throw new AppError("This booking is not assigned to you", 403);
+
+    // Accept from CONFIRMED (just paid, nanny hasn't reacted yet) OR
+    // from NANNY_ASSIGNED (idempotent re-confirm, no harm).
+    if (
+      booking.status !== BookingStatus.CONFIRMED &&
+      booking.status !== BookingStatus.NANNY_ASSIGNED
+    )
+      throw new AppError(
+        `Cannot confirm booking in status: ${booking.status}. Booking must be CONFIRMED.`,
+        400,
+      );
+
+    // Idempotency: already NANNY_ASSIGNED means the nanny already confirmed —
+    // return the current booking without re-emitting the event.
+    if (booking.status === BookingStatus.NANNY_ASSIGNED) {
+      log.info(`[confirmBooking] Already NANNY_ASSIGNED, returning early. bookingId=${bookingId}`);
+      return booking;
+    }
+
+    const updated = await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.NANNY_ASSIGNED,
+        timeline: appendTimeline(
+          booking.timeline,
+          BookingStatus.NANNY_ASSIGNED,
+          "Nanny confirmed the booking via notification",
+        ) as any,
+      },
+    });
+
+    // Fire event — booking.events.ts listener will FCM the user
+    bus.emit(Events.BOOKING_CONFIRMED, {
+      bookingId,
+      userId: booking.userId,
+      nannyId: nanny.id,
+    });
+
+    log.info(
+      `[confirmBooking] bookingId=${bookingId} nannyId=${nanny.id} → NANNY_ASSIGNED`,
+    );
+    return updated;
+  }
+
+  // ── PATCH /api/v1/bookings/:id/reject ────────────────────────────────────
+  // Called by the nanny when they tap Reject on the booking request notification.
+  //
+  // Flow:
+  //   Nanny taps Reject → PATCH /:id/reject
+  //   Status moves CONFIRMED → CANCELLED_BY_NANNY, nannyId cleared
+  //   bus.emit BOOKING_CANCELLED → FCM sent to user
+  async rejectBooking(bookingId: string, nannyUserId: string, reason?: string) {
+    const nanny = await prisma.nanny.findUnique({ where: { userId: nannyUserId } });
+    if (!nanny) throw new AppError("Nanny profile not found", 404);
+
+    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new AppError("Booking not found", 404);
+
+    if (booking.nannyId !== nanny.id)
+      throw new AppError("This booking is not assigned to you", 403);
+
+    if (booking.status !== BookingStatus.CONFIRMED)
+      throw new AppError(
+        `Cannot reject booking in status: ${booking.status}. Booking must be CONFIRMED.`,
+        400,
+      );
+
+    const cancellationReason = reason?.trim() || "Nanny declined the booking";
+
+    const updated = await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.CANCELLED_BY_NANNY,
+        nannyId: null, // free the slot so admin can reassign
+        cancellationReason,
+        cancelledBy: nanny.userId,
+        timeline: appendTimeline(
+          booking.timeline,
+          BookingStatus.CANCELLED_BY_NANNY,
+          cancellationReason,
+        ) as any,
+      },
+    });
+
+    // Fire event — booking.events.ts listener will FCM the user
+    bus.emit(Events.BOOKING_CANCELLED, {
+      bookingId,
+      userId: booking.userId,
+      reason: cancellationReason,
+      status: BookingStatus.CANCELLED_BY_NANNY,
+    });
+
+    log.info(
+      `[rejectBooking] bookingId=${bookingId} nannyId=${nanny.id} reason="${cancellationReason}"`,
+    );
+    return updated;
+  }
+
+  // ── PATCH /api/v1/bookings/:id/start ─────────────────────────────────────
   async startBooking(bookingId: string, userId: string) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
@@ -913,7 +1010,6 @@ export class BookingService {
 
     const isRange = RANGE_TYPES.includes(booking.serviceType as any);
 
-    // Status gate
     if (isRange) {
       const status = booking.status;
       const isAllowed =
@@ -937,7 +1033,6 @@ export class BookingService {
     const today = new Date(now);
     today.setUTCHours(0, 0, 0, 0);
 
-    // Lateness: compare now against the scheduled start time's time-of-day applied to today
     const scheduledStart = new Date(booking.scheduledStartTime);
     const todayScheduled = new Date(
       Date.UTC(
@@ -959,7 +1054,6 @@ export class BookingService {
         ? AttendanceStatus.LATE
         : AttendanceStatus.PRESENT;
 
-    // Attendance upsert
     const existing = await getTodayAttendance(bookingId, nanny.id);
     if (existing) {
       if (existing.clockInAt)
@@ -987,7 +1081,6 @@ export class BookingService {
       });
     }
 
-    // Update booking
     const isFirstStart = booking.status !== BookingStatus.IN_PROGRESS;
     const lateNote =
       lateMinutes > LATE_THRESHOLD_MINUTES ? ` (${lateMinutes} min late)` : "";
@@ -1019,11 +1112,6 @@ export class BookingService {
   }
 
   // ── PATCH /api/v1/bookings/:id/complete ──────────────────────────────────
-  //
-  // ONE_TIME / OVERNIGHT / EMERGENCY  → IN_PROGRESS → COMPLETED immediately
-  // FULL_TIME / PART_TIME / MONTHLY   → clock-out for today.
-  //   If today >= scheduledEndDate    → COMPLETED + totalBookings++
-  //   Otherwise                       → stays IN_PROGRESS (nanny returns tomorrow)
   async completeBooking(bookingId: string, userId: string) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
@@ -1043,18 +1131,15 @@ export class BookingService {
     const now = new Date();
     const isRange = RANGE_TYPES.includes(booking.serviceType as any);
 
-    // Must have clocked in before clocking out
     const attendance = await getTodayAttendance(bookingId, nanny.id);
     if (!attendance?.clockInAt)
       throw new AppError("You must clock in before you can clock out.", 400);
     if (attendance.clockOutAt)
       throw new AppError("You have already clocked out for today.", 400);
 
-    // Worked time and half-day check
     const workedMs = now.getTime() - attendance.clockInAt.getTime();
     const workedHrs = workedMs / 3_600_000;
 
-    // Expected hours = daily shift length derived from scheduledStartTime→scheduledEndTime
     const expectedHrs = calcSessionHours(
       new Date(booking.scheduledStartTime),
       new Date(booking.scheduledEndTime),
@@ -1069,7 +1154,6 @@ export class BookingService {
       data: { clockOutAt: now, status: finalAttStatus },
     });
 
-    // Is this the final day?
     const today = new Date(now);
     today.setUTCHours(0, 0, 0, 0);
     const engagementEnd = new Date(booking.scheduledEndTime);
@@ -1260,7 +1344,6 @@ export class BookingService {
       },
     });
 
-    // Seed attendance rows immediately after payment — safe to fail silently
     try {
       const { seeded } = await seedAttendanceRecords(bookingId);
       log.info(
@@ -1273,7 +1356,11 @@ export class BookingService {
       );
     }
 
-    log.info(`Booking ${bookingId} confirmed via payment`);
+    // Fire BOOKING_CREATED event NOW (after payment, not at booking creation)
+    // so the FCM to the nanny goes out only when money is secured.
+    bus.emit(Events.BOOKING_CREATED, { bookingId, userId: booking.userId });
+
+    log.info(`Booking ${bookingId} confirmed via payment — nanny notification triggered`);
   }
 
   async handlePaymentFailed(bookingId: string) {
@@ -1370,13 +1457,14 @@ export class BookingService {
     });
     return updated;
   }
+
+  // ── GET /api/v1/bookings/:id/active-shift ────────────────────────────────
   async getActiveShift(
     userId: string,
   ): Promise<{ bookingId: string; booking: any } | null> {
     const nanny = await prisma.nanny.findUnique({ where: { userId } });
     if (!nanny) return null;
 
-    // Find any IN_PROGRESS booking assigned to this nanny
     const booking = await prisma.booking.findFirst({
       where: {
         nannyId: nanny.id,
@@ -1394,7 +1482,6 @@ export class BookingService {
 
     if (!booking) return null;
 
-    // Now check today's attendance record
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
@@ -1408,13 +1495,9 @@ export class BookingService {
       },
     });
 
-    // Nanny has not clocked in today at all → no active shift
     if (!todayAttendance?.clockInAt) return null;
-
-    // Nanny already clocked OUT today → shift is done for today, don't lock
     if (todayAttendance.clockOutAt) return null;
 
-    // Nanny is clocked in and has NOT clocked out → actively mid-shift
     return { bookingId: booking.id, booking };
   }
 }
