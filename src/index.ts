@@ -8,7 +8,7 @@ import { createServer } from "http";
 import { Server as SocketServer } from "socket.io";
 
 import { config } from "./config";
-import { connectDB, disconnectDB } from "./config/prisma";
+import { connectDB, disconnectDB, prisma } from "./config/prisma";
 import { createLogger } from "./utils/logger";
 import { registerEventHandlers } from "./utils/eventHandlers";
 import { JwtUtils } from "./utils/jwt";
@@ -24,11 +24,11 @@ import { notificationRouter } from "./routes/notification.routes";
 import { adminRouter } from "./routes/admin.routes";
 
 import { errorHandler, notFound } from "./middlewares/index";
-import { seedRouter } from "./routes/seed.routes";
+// import { seedRouter } from "./routes/seed.routes";
 import * as admin from "firebase-admin";
 import { goalRouter } from "./routes/goal.routes";
-import { planRouter }           from './routes/plan.routes';
-import { registerDailyPlanJob } from './jobs/dailyPlan.job';
+import { planRouter } from "./routes/plan.routes";
+import { registerDailyPlanJob } from "./jobs/dailyPlan.job";
 
 // const serviceAccount = require("../service-account.json");
 const serviceAccount = require("./etc/secrets/service-account.json");
@@ -82,7 +82,7 @@ io.on("connection", (socket) => {
         type: data.type || "TEXT",
         createdAt: new Date().toISOString(),
       });
-    },
+    }
   );
 
   socket.on("disconnect", () => {
@@ -106,7 +106,7 @@ app.use(
       statusCode: 429,
     },
     skip: () => config.isDev,
-  }),
+  })
 );
 
 // Razorpay webhook needs raw body for HMAC verification — must be before express.json()
@@ -117,8 +117,23 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 /* ── Health check ───────────────────────────────────────────────────────── */
-app.get("/health", (_req, res) => {
+app.get("/health", async (_req, res) => {
+  const data = await prisma.booking.findUnique({
+    where: {
+      id: "69e202768ff166a3ebbacb12",
+    },
+    include: {
+      childGoals: true,
+      dailyPlan: {
+        include:{
+          tasks:true
+        }
+      },
+      // requestedDayWiseDailyPlan:true,
+    },
+  });
   res.json({
+    data: data,
     status: "ok",
     service: "nanny-app",
     env: config.env,
@@ -127,24 +142,24 @@ app.get("/health", (_req, res) => {
 });
 
 /* ── API Routes ─────────────────────────────────────────────────────────── */
-app.use('/api/v1/pushData', seedRouter);
-app.use('/api/v1/auth',          authRouter);
-app.use('/api/v1/users',         userRouter);
-app.use('/api/v1/nannies',       nannyRouter);
-app.use('/api/v1/bookings',      bookingRouter);
-app.use('/api/v1/payments',      paymentRouter);
-app.use('/api/v1/location',      locationRouter);
-app.use('/api/v1/chat',          chatRouter);
-app.use('/api/v1/notifications', notificationRouter);
-app.use('/api/v1/admin',         adminRouter);
-app.use("/api/v1/goals",         goalRouter);
+// app.use('/api/v1/pushData', seedRouter);
+app.use("/api/v1/auth", authRouter);
+app.use("/api/v1/users", userRouter);
+app.use("/api/v1/nannies", nannyRouter);
+app.use("/api/v1/bookings", bookingRouter);
+app.use("/api/v1/payments", paymentRouter);
+app.use("/api/v1/location", locationRouter);
+app.use("/api/v1/chat", chatRouter);
+app.use("/api/v1/notifications", notificationRouter);
+app.use("/api/v1/admin", adminRouter);
+app.use("/api/v1/goals", goalRouter);
 
 // PlanRouter API
-app.use('/api/v1/plan')
+app.use("/api/v1/plan", planRouter);
 
 /* ── 404 + error handler ────────────────────────────────────────────────── */
 app.use(notFound);
-app.use(errorHandler,            planRouter);
+app.use(errorHandler, planRouter);
 
 /* ── Start ──────────────────────────────────────────────────────────────── */
 async function start() {
@@ -186,7 +201,7 @@ async function start() {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("unhandledRejection", (reason) =>
-    log.error("Unhandled rejection", { reason }),
+    log.error("Unhandled rejection", { reason })
   );
   process.on("uncaughtException", (err) => {
     log.error("Uncaught exception", { error: err.message });

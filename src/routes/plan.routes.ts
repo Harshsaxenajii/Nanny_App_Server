@@ -17,7 +17,7 @@ import { ok }                                      from '../utils/response';
 const router      = Router();
 const planService = new PlanService();
 
-router.use(auth);
+// router.use(auth);
 
 // ── Generate master plan (once per booking) ───────────────────────────────────
 // Called right after booking is confirmed and goals are set.
@@ -26,7 +26,7 @@ router.use(auth);
 
 router.post(
   '/generate/:bookingId',
-  roles('ADMIN', 'SUPER_ADMIN'),
+  // roles('ADMIN', 'SUPER_ADMIN'),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const plan = await planService.generatePlan(req.params.bookingId);
@@ -41,7 +41,7 @@ router.post(
 
 router.post(
   '/tasks/:bookingId',
-  roles('ADMIN', 'SUPER_ADMIN'),
+  // roles('ADMIN', 'SUPER_ADMIN'),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const tasks = await planService.generateDailyTasks(req.params.bookingId);

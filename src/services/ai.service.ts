@@ -47,7 +47,7 @@ export interface AiDailyPlan {
 }
 
 export interface GenerateDailyTasksInput {
-  parentGoalPrompt:    string;
+  // parentGoalPrompt:    string;
   childAgeMonths:      number;
   childGender:         string;
   overallStrategy:     string;
@@ -189,7 +189,7 @@ Schema:
   }]
 }
 
-Parent's goal prompt: "${input.parentGoalPrompt}"
+// Parent's goal prompt: " "
 
 Child info:
 - Age: ${input.childAgeMonths} months
@@ -250,7 +250,7 @@ Return only valid JSON.
   // Calls Gemini and returns cleaned plain text.
   // Strips markdown fences Gemini adds despite being told not to.
   private async callGemini(prompt: string): Promise<string> {
-    const model  = this.gemini.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model  = this.gemini.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
     const result = await model.generateContent(prompt);
     const raw    = result.response.text().trim();
 
