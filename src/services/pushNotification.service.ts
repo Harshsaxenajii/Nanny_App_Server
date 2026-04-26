@@ -51,7 +51,7 @@ function buildBookingPayload(booking: {
     childAge:     booking.childAge,
     distance:     booking.distance,
     specialNotes: booking.specialNotes ?? "",
-    expiresIn:    String(booking.expiresIn ?? 30),
+    expiresIn:    String(booking.expiresIn ?? 300_000),
   };
 }
 
@@ -75,7 +75,7 @@ async function sendMessages(
 
       android: {
         priority: "high",
-        ttl:      isUrgent ? 30_000 : 3_600_000,
+        ttl:      isUrgent ? 300_000 : 3_600_000,
       },
 
       apns: {

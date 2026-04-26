@@ -86,8 +86,8 @@ async function getTodayAttendance(bookingId: string, nannyId: string) {
 
 /**
  * Pre-creates PENDING attendance rows for every working day in the booking.
- * Called automatically from handlePaymentCaptured.
- * Safe to call multiple times — upserts by the (bookingId, scheduledDate) unique key.
+ * Called after payment is captured (CONFIRMED → NANNY_ASSIGNED).
+ * Safe to call multiple times — upserts by (bookingId, scheduledDate) unique key.
  */
 async function seedAttendanceRecords(
   bookingId: string,
@@ -293,9 +293,21 @@ export function validateCoupon(code: string): {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BOOKING SERVICE
+//
+// STATUS LIFECYCLE (correct flow):
+//
+//   PENDING_PAYMENT   → booking created, awaiting nanny confirmation
+//   CONFIRMED         → nanny accepted, awaiting user payment
+//   NANNY_ASSIGNED    → payment received, ready to start
+//   IN_PROGRESS       → nanny clocked in, service running
+//   COMPLETED         → service finished
+//
 // ─────────────────────────────────────────────────────────────────────────────
 export class BookingService {
   // ── POST /api/v1/bookings ────────────────────────────────────────────────
+  // Creates booking as PENDING_PAYMENT (waiting for nanny to confirm).
+  // Immediately emits BOOKING_CREATED so the nanny gets the FCM push.
+  // No payment is involved at this point.
   async createBooking(userId: string, body: any) {
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new AppError("User not found", 404);
@@ -457,7 +469,8 @@ export class BookingService {
         baseAmount: pricing.baseFee,
         gstAmount: pricing.gst,
         totalAmount: pricing.total,
-        status: BookingStatus.PENDING_PAYMENT,
+        // PENDING_NANNY_CONFIRMATION = awaiting nanny confirmation (no payment yet)
+        status: BookingStatus.PENDING_NANNY_CONFIRMATION,
         pricingDetails: {
           sessionHours: pricing.sessionHours,
           workingDays: pricing.workingDays,
@@ -474,8 +487,8 @@ export class BookingService {
         },
         timeline: appendTimeline(
           [],
-          BookingStatus.PENDING_PAYMENT,
-          "Booking created, awaiting payment",
+          BookingStatus.PENDING_NANNY_CONFIRMATION,
+          "Booking created — awaiting nanny confirmation",
         ) as any,
       },
       include: { children: true },
@@ -561,375 +574,64 @@ export class BookingService {
       );
     }
 
+    // Emit immediately — events.ts handler sends FCM to nanny right now.
+    // Nanny must confirm BEFORE user pays.
     bus.emit(Events.BOOKING_CREATED, { bookingId: booking.id, userId });
-    log.info(`Booking created: ${booking.id} | total: ₹${pricing.total}`);
+    log.info(
+      `[createBooking] id=${booking.id} total=₹${pricing.total} — nanny FCM triggered`,
+    );
     return { ...booking, pricing };
   }
 
-  // ── POST /api/v1/bookings/:bookingId/tasks/:taskName/done ────────────────
-  async markTaskDone(nannyUserId: string, bookingId: string, taskName: string) {
-    const nanny = await prisma.nanny.findUnique({
-      where: { userId: nannyUserId },
-    });
-    if (!nanny) throw new AppError("Nanny profile not found", 404);
-
-    const booking = await prisma.booking.findUnique({
-      where: { id: bookingId },
-    });
-    if (!booking) throw new AppError("Booking not found", 404);
-    if (booking.nannyId !== nanny.id)
-      throw new AppError("You are not assigned to this booking", 403);
-    if (booking.status !== BookingStatus.IN_PROGRESS)
-      throw new AppError(
-        "Tasks can only be marked done when booking is in progress",
-        400,
-      );
-
-    const tasks = (booking.requestedTasks as any[]) ?? [];
-    const taskIndex = tasks.findIndex((t) => t.task === taskName);
-    if (taskIndex === -1)
-      throw new AppError(`Task "${taskName}" not found in this booking`, 404);
-    if (tasks[taskIndex].isDone)
-      throw new AppError(`Task "${taskName}" is already marked as done`, 400);
-
-    tasks[taskIndex] = {
-      ...tasks[taskIndex],
-      isDone: true,
-      doneAt: new Date().toISOString(),
-    };
-    return prisma.booking.update({
-      where: { id: bookingId },
-      data: { requestedTasks: tasks },
-    });
-  }
-
-  // ── PATCH /api/v1/bookings/:id/daily-plan/task/:taskId ───────────────────
-  async updatePlanTask(
-    nannyUserId: string,
-    bookingId: string,
-    taskId: string,
-    body: { status: "COMPLETED" | "SKIPPED"; notes?: string },
-  ) {
-    const nanny = await prisma.nanny.findUnique({
-      where: { userId: nannyUserId },
-    });
-    if (!nanny) throw new AppError("Nanny profile not found", 404);
-
-    const booking = await prisma.booking.findUnique({
-      where: { id: bookingId },
-    });
-    if (!booking) throw new AppError("Booking not found", 404);
-    if (booking.nannyId !== nanny.id)
-      throw new AppError("You are not assigned to this booking", 403);
-    if (booking.status !== "IN_PROGRESS")
-      throw new AppError(
-        "Tasks can only be updated when the booking is in progress",
-        400,
-      );
-
-    const task = await prisma.planTask.findUnique({
-      where: { id: taskId },
-      include: { plan: true },
-    });
-    if (!task) throw new AppError(`Task ${taskId} not found`, 404);
-    if (task.plan.bookingId !== bookingId)
-      throw new AppError(
-        "This task does not belong to the specified booking",
-        403,
-      );
-
-    const VALID_STATUSES = ["COMPLETED", "SKIPPED"];
-    console.log(body.status);
-    if (!VALID_STATUSES.includes(body.status))
-      throw new AppError(
-        `Invalid status "${body.status}". Must be one of: ${VALID_STATUSES.join(", ")}`,
-        400,
-      );
-
-    const updated = await prisma.planTask.update({
-      where: { id: taskId },
-      data: { status: body.status as any, updatedAt: new Date() },
-    });
-
-    if (body.notes) {
-      await prisma.taskLog.upsert({
-        where: { taskId },
-        create: {
-          taskId,
-          nannyId: nanny.id,
-          childrenId: booking.childrenId,
-          nannyNote: body.notes,
-          completedAt: body.status === "COMPLETED" ? new Date() : null,
-        },
-        update: {
-          nannyNote: body.notes,
-          ...(body.status === "COMPLETED" ? { completedAt: new Date() } : {}),
-        },
-      });
-    }
-
-    await prisma.booking.update({
-      where: { id: bookingId },
-      data: {
-        timeline: appendTimeline(
-          booking.timeline,
-          BookingStatus.IN_PROGRESS,
-          `Task "${task.title}" marked ${body.status} by nanny`,
-        ) as any,
-      },
-    });
-
-    log.info(
-      `[updatePlanTask] taskId=${taskId} bookingId=${bookingId} status=${body.status}`,
-    );
-    return updated;
-  }
-
-  // ── GET /api/v1/bookings ─────────────────────────────────────────────────
-  async getMyBookings(userId: string, role: string, query: any) {
-    const { page, limit, skip } = paginate(query);
-
-    if (!["USER", "NANNY", "ADMIN", "SUPER_ADMIN"].includes(role))
-      throw new AppError("You do not have permission to view bookings", 403);
-
-    let nannyId: string | undefined;
-    if (role === "NANNY") {
-      const nanny = await prisma.nanny.findUnique({ where: { userId } });
-      if (!nanny) throw new AppError("Nanny profile not found.", 404);
-      nannyId = nanny.id;
-    }
-
-    const baseWhere: any =
-      role === "NANNY" && nannyId ? { nannyId } : { userId };
-
-    if (query.status) {
-      const valid: BookingStatus[] = [
-        BookingStatus.PENDING_PAYMENT,
-        BookingStatus.CONFIRMED,
-        BookingStatus.NANNY_ASSIGNED,
-        BookingStatus.IN_PROGRESS,
-        BookingStatus.COMPLETED,
-        BookingStatus.CANCELLED_BY_USER,
-        BookingStatus.CANCELLED_BY_NANNY,
-        BookingStatus.CANCELLED_BY_ADMIN,
-      ];
-      if (!valid.includes(query.status as BookingStatus))
-        throw new AppError(`Invalid status '${query.status}'`, 400);
-      baseWhere.status = query.status as BookingStatus;
-    }
-
-    const include = {
-      user: {
-        select: { id: true, name: true, mobile: true, profilePhoto: true },
-      },
-      nanny: {
-        select: {
-          id: true,
-          name: true,
-          mobile: true,
-          profilePhoto: true,
-          rating: true,
-        },
-      },
-    };
-
-    if (query.status) {
-      const [bookings, total] = await Promise.all([
-        prisma.booking.findMany({
-          where: baseWhere,
-          skip,
-          take: limit,
-          orderBy: { createdAt: "desc" },
-          include,
-        }),
-        prisma.booking.count({ where: baseWhere }),
-      ]);
-      return paginatedResult(bookings, total, page, limit);
-    }
-
-    const [inProgress, others, total] = await Promise.all([
-      prisma.booking.findMany({
-        where: { ...baseWhere, status: BookingStatus.IN_PROGRESS },
-        orderBy: { updatedAt: "desc" },
-        include,
-      }),
-      prisma.booking.findMany({
-        where: { ...baseWhere, status: { not: BookingStatus.IN_PROGRESS } },
-        skip,
-        take: Math.max(0, limit - 0),
-        orderBy: { createdAt: "desc" },
-        include,
-      }),
-      prisma.booking.count({ where: baseWhere }),
-    ]);
-
-    const merged = [...inProgress, ...others].slice(skip, skip + limit);
-    return paginatedResult(merged, total, page, limit);
-  }
-
-  // ── GET /api/v1/bookings/:id ─────────────────────────────────────────────
-  async getBookingById(bookingId: string, userId: string, role: string) {
-    const booking = await prisma.booking.findUnique({
-      where: { id: bookingId },
-      include: {
-        user: {
-          select: { id: true, name: true, mobile: true, profilePhoto: true },
-        },
-        nanny: {
-          select: {
-            id: true,
-            name: true,
-            mobile: true,
-            profilePhoto: true,
-            rating: true,
-          },
-        },
-        dailyPlan: { include: { tasks: true } },
-        requestedDayWiseDailyPlan: { include: { requestedDailyPlan: true } },
-        attendanceRecords: { orderBy: { scheduledDate: "asc" } },
-      },
-    });
-    if (!booking) throw new AppError("Booking not found", 404);
-
-    const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(role);
-    const isOwner = booking.userId === userId;
-    let isNanny = false;
-
-    if (!isOwner && !isAdmin) {
-      const nanny = await prisma.nanny.findUnique({ where: { userId } });
-      isNanny = !!nanny && booking.nannyId === nanny.id;
-      if (!isNanny)
-        throw new AppError("You do not have access to this booking", 403);
-    }
-    return booking;
-  }
-
-  // ── GET /api/v1/bookings/:id/attendance ──────────────────────────────────
-  async getBookingAttendance(
-    bookingId: string,
-    requesterId: string,
-    role: string,
-  ) {
-    const booking = await prisma.booking.findUnique({
-      where: { id: bookingId },
-    });
-    if (!booking) throw new AppError("Booking not found", 404);
-
-    const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(role);
-    const isOwner = booking.userId === requesterId;
-    let isNanny = false;
-
-    if (!isOwner && !isAdmin) {
-      const nanny = await prisma.nanny.findUnique({
-        where: { userId: requesterId },
-      });
-      isNanny = !!nanny && booking.nannyId === nanny.id;
-      if (!isNanny) throw new AppError("Access denied", 403);
-    }
-
-    const records = await prisma.attendanceRecord.findMany({
-      where: { bookingId },
-      orderBy: { scheduledDate: "asc" },
-    });
-
-    const summary = {
-      total: records.length,
-      present: records.filter((r) => r.status === AttendanceStatus.PRESENT)
-        .length,
-      late: records.filter((r) => r.status === AttendanceStatus.LATE).length,
-      halfDay: records.filter((r) => r.status === AttendanceStatus.HALF_DAY)
-        .length,
-      absent: records.filter((r) => r.status === AttendanceStatus.ABSENT)
-        .length,
-      pending: records.filter((r) => r.status === AttendanceStatus.PENDING)
-        .length,
-    };
-
-    return { records, summary };
-  }
-
-  // ── PATCH /api/v1/bookings/:id/accept ────────────────────────────────────
-  async acceptBooking(bookingId: string, userId: string) {
-    const booking = await prisma.booking.findUnique({
-      where: { id: bookingId },
-    });
-    if (!booking) throw new AppError("Booking not found", 404);
-
-    const nanny = await prisma.nanny.findUnique({ where: { userId } });
-    if (!nanny) throw new AppError("Nanny profile not found", 404);
-    if (booking.nannyId !== nanny.id)
-      throw new AppError("This booking is not assigned to you", 403);
-    if (booking.status !== BookingStatus.CONFIRMED)
-      throw new AppError(
-        `Cannot accept booking in status: ${booking.status}. Booking must be CONFIRMED.`,
-        400,
-      );
-
-    return prisma.booking.update({
-      where: { id: bookingId },
-      data: {
-        status: BookingStatus.NANNY_ASSIGNED,
-        timeline: appendTimeline(
-          booking.timeline,
-          BookingStatus.NANNY_ASSIGNED,
-          "Nanny accepted the booking",
-        ) as any,
-      },
-    });
-  }
-
   // ── PATCH /api/v1/bookings/:id/confirm ───────────────────────────────────
-  // Called by the nanny when they tap Accept on the booking request notification.
-  // This is the NEW notification-driven confirm — distinct from acceptBooking
-  // (which requires NANNY_ASSIGNED; this works from CONFIRMED status i.e.
-  // right after payment, before the nanny has explicitly accepted in-app).
+  // Nanny taps Accept on the BookingRequestOverlay or notification action.
   //
-  // Flow:
-  //   User pays → CONFIRMED → FCM sent to nanny
-  //   Nanny taps Accept (overlay or notification action) → PATCH /:id/confirm
-  //   Status moves CONFIRMED → NANNY_ASSIGNED
-  //   bus.emit BOOKING_CONFIRMED → FCM sent to user → user redirected to payment receipt
+  // PENDING_PAYMENT → CONFIRMED
+  // (CONFIRMED = nanny said yes, now waiting for the user to pay)
+  //
+  // After this, events.ts sends "Nanny confirmed" FCM to the user.
+  // The user's app receives it and navigates to the payment screen.
   async confirmBooking(bookingId: string, nannyUserId: string) {
-    const nanny = await prisma.nanny.findUnique({ where: { userId: nannyUserId } });
+    const nanny = await prisma.nanny.findUnique({
+      where: { userId: nannyUserId },
+    });
     if (!nanny) throw new AppError("Nanny profile not found", 404);
 
-    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
     if (!booking) throw new AppError("Booking not found", 404);
 
     if (booking.nannyId !== nanny.id)
       throw new AppError("This booking is not assigned to you", 403);
 
-    // Accept from CONFIRMED (just paid, nanny hasn't reacted yet) OR
-    // from NANNY_ASSIGNED (idempotent re-confirm, no harm).
-    if (
-      booking.status !== BookingStatus.CONFIRMED &&
-      booking.status !== BookingStatus.NANNY_ASSIGNED
-    )
-      throw new AppError(
-        `Cannot confirm booking in status: ${booking.status}. Booking must be CONFIRMED.`,
-        400,
+    // Idempotent: already confirmed (awaiting payment), return early without re-emitting
+    if (booking.status === BookingStatus.PENDING_PAYMENT) {
+      log.info(
+        `[confirmBooking] Already PENDING_PAYMENT, returning early. bookingId=${bookingId}`,
       );
-
-    // Idempotency: already NANNY_ASSIGNED means the nanny already confirmed —
-    // return the current booking without re-emitting the event.
-    if (booking.status === BookingStatus.NANNY_ASSIGNED) {
-      log.info(`[confirmBooking] Already NANNY_ASSIGNED, returning early. bookingId=${bookingId}`);
       return booking;
     }
+
+    if (booking.status !== BookingStatus.PENDING_NANNY_CONFIRMATION)
+      throw new AppError(
+        `Cannot confirm booking in status: ${booking.status}. Booking must be PENDING_NANNY_CONFIRMATION.`,
+        400,
+      );
 
     const updated = await prisma.booking.update({
       where: { id: bookingId },
       data: {
-        status: BookingStatus.NANNY_ASSIGNED,
+        status: BookingStatus.PENDING_PAYMENT,
         timeline: appendTimeline(
           booking.timeline,
-          BookingStatus.NANNY_ASSIGNED,
-          "Nanny confirmed the booking via notification",
+          BookingStatus.PENDING_PAYMENT,
+          "Nanny accepted — awaiting user payment",
         ) as any,
       },
     });
 
-    // Fire event — booking.events.ts listener will FCM the user
+    // events.ts listener will send "Nanny confirmed, please pay" FCM to user
     bus.emit(Events.BOOKING_CONFIRMED, {
       bookingId,
       userId: booking.userId,
@@ -937,31 +639,33 @@ export class BookingService {
     });
 
     log.info(
-      `[confirmBooking] bookingId=${bookingId} nannyId=${nanny.id} → NANNY_ASSIGNED`,
+      `[confirmBooking] bookingId=${bookingId} nannyId=${nanny.id} → CONFIRMED`,
     );
     return updated;
   }
 
   // ── PATCH /api/v1/bookings/:id/reject ────────────────────────────────────
-  // Called by the nanny when they tap Reject on the booking request notification.
+  // Nanny taps Reject on the BookingRequestOverlay or notification action.
   //
-  // Flow:
-  //   Nanny taps Reject → PATCH /:id/reject
-  //   Status moves CONFIRMED → CANCELLED_BY_NANNY, nannyId cleared
-  //   bus.emit BOOKING_CANCELLED → FCM sent to user
+  // PENDING_PAYMENT → CANCELLED_BY_NANNY
+  // nannyId cleared so admin can reassign.
   async rejectBooking(bookingId: string, nannyUserId: string, reason?: string) {
-    const nanny = await prisma.nanny.findUnique({ where: { userId: nannyUserId } });
+    const nanny = await prisma.nanny.findUnique({
+      where: { userId: nannyUserId },
+    });
     if (!nanny) throw new AppError("Nanny profile not found", 404);
 
-    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
     if (!booking) throw new AppError("Booking not found", 404);
 
     if (booking.nannyId !== nanny.id)
       throw new AppError("This booking is not assigned to you", 403);
 
-    if (booking.status !== BookingStatus.CONFIRMED)
+    if (booking.status !== BookingStatus.PENDING_NANNY_CONFIRMATION)
       throw new AppError(
-        `Cannot reject booking in status: ${booking.status}. Booking must be CONFIRMED.`,
+        `Cannot reject booking in status: ${booking.status}. Booking must be PENDING_NANNY_CONFIRMATION.`,
         400,
       );
 
@@ -971,7 +675,7 @@ export class BookingService {
       where: { id: bookingId },
       data: {
         status: BookingStatus.CANCELLED_BY_NANNY,
-        nannyId: null, // free the slot so admin can reassign
+        nannyId: null,
         cancellationReason,
         cancelledBy: nanny.userId,
         timeline: appendTimeline(
@@ -982,7 +686,7 @@ export class BookingService {
       },
     });
 
-    // Fire event — booking.events.ts listener will FCM the user
+    // events.ts listener sends "nanny unavailable" FCM to user
     bus.emit(Events.BOOKING_CANCELLED, {
       bookingId,
       userId: booking.userId,
@@ -996,7 +700,107 @@ export class BookingService {
     return updated;
   }
 
+  // ── Payment events ────────────────────────────────────────────────────────
+  // handlePaymentCaptured: called by your payment webhook.
+  //
+  // CONFIRMED → NANNY_ASSIGNED
+  // (CONFIRMED = nanny accepted, NANNY_ASSIGNED = money received, ready to start)
+  async handlePaymentCaptured(bookingId: string, paymentId?: string) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
+
+    // Only process if booking is PENDING_PAYMENT (nanny accepted, payment was pending)
+    if (!booking || booking.status !== BookingStatus.PENDING_PAYMENT) return;
+
+    await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.CONFIRMED,
+        paymentId: paymentId ?? null,
+        timeline: appendTimeline(
+          booking.timeline,
+          BookingStatus.CONFIRMED,
+          "Payment received — booking fully confirmed",
+        ) as any,
+      },
+    });
+
+    // Seed attendance rows now that both nanny and payment are confirmed
+    try {
+      const { seeded } = await seedAttendanceRecords(bookingId);
+      log.info(
+        `[handlePaymentCaptured] bookingId=${bookingId} attendanceRowsSeeded=${seeded}`,
+      );
+    } catch (e) {
+      log.error(
+        `[handlePaymentCaptured] attendance seed failed for bookingId=${bookingId}`,
+        e,
+      );
+    }
+
+    log.info(`[handlePaymentCaptured] bookingId=${bookingId} → CONFIRMED`);
+  }
+
+  async handlePaymentFailed(bookingId: string) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
+
+    // Only cancel if still waiting for payment (nanny confirmed but user hasn't paid)
+    if (!booking || booking.status !== BookingStatus.PENDING_PAYMENT) return;
+
+    await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.CANCELLED_BY_USER,
+        cancellationReason: "Payment failed or was declined",
+        timeline: appendTimeline(
+          booking.timeline,
+          BookingStatus.CANCELLED_BY_USER,
+          "Payment failed",
+        ) as any,
+      },
+    });
+
+    bus.emit(Events.PAYMENT_FAILED, { bookingId, userId: booking.userId });
+  }
+
+  // ── PATCH /api/v1/bookings/:id/accept ────────────────────────────────────
+  // Legacy in-app accept (kept for compatibility).
+  // The notification-driven flow uses confirmBooking() above instead.
+  async acceptBooking(bookingId: string, userId: string) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
+    if (!booking) throw new AppError("Booking not found", 404);
+
+    const nanny = await prisma.nanny.findUnique({ where: { userId } });
+    if (!nanny) throw new AppError("Nanny profile not found", 404);
+    if (booking.nannyId !== nanny.id)
+      throw new AppError("This booking is not assigned to you", 403);
+    if (booking.status !== BookingStatus.PENDING_PAYMENT)
+      throw new AppError(
+        `Cannot accept booking in status: ${booking.status}. Booking must be PENDING_PAYMENT.`,
+        400,
+      );
+
+    return prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        status: BookingStatus.CONFIRMED,
+        timeline: appendTimeline(
+          booking.timeline,
+          BookingStatus.CONFIRMED,
+          "Nanny accepted the booking — awaiting user payment",
+        ) as any,
+      },
+    });
+  }
+
   // ── PATCH /api/v1/bookings/:id/start ─────────────────────────────────────
+  // Nanny clocks in. Booking must be NANNY_ASSIGNED (payment done).
+  // Range types also allow re-clock-in from IN_PROGRESS on subsequent days.
   async startBooking(bookingId: string, userId: string) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
@@ -1011,20 +815,18 @@ export class BookingService {
     const isRange = RANGE_TYPES.includes(booking.serviceType as any);
 
     if (isRange) {
-      const status = booking.status;
-      const isAllowed =
-        status === BookingStatus.CONFIRMED ||
-        status === BookingStatus.NANNY_ASSIGNED ||
-        status === BookingStatus.IN_PROGRESS;
-      if (!isAllowed)
+      const allowed =
+        booking.status === BookingStatus.CONFIRMED ||
+        booking.status === BookingStatus.IN_PROGRESS;
+      if (!allowed)
         throw new AppError(
-          `Cannot start booking in status: ${booking.status}.`,
+          `Cannot start booking in status: ${booking.status}. Must be CONFIRMED or IN_PROGRESS.`,
           400,
         );
     } else {
-      if (booking.status !== BookingStatus.NANNY_ASSIGNED)
+      if (booking.status !== BookingStatus.CONFIRMED)
         throw new AppError(
-          `Cannot start booking in status: ${booking.status}. Booking must be NANNY_ASSIGNED.`,
+          `Cannot start booking in status: ${booking.status}. Booking must be CONFIRMED.`,
           400,
         );
     }
@@ -1324,63 +1126,285 @@ export class BookingService {
     return updated;
   }
 
-  // ── Payment events ────────────────────────────────────────────────────────
-  async handlePaymentCaptured(bookingId: string, paymentId?: string) {
+  // ── POST /api/v1/bookings/:bookingId/tasks/:taskName/done ────────────────
+  async markTaskDone(nannyUserId: string, bookingId: string, taskName: string) {
+    const nanny = await prisma.nanny.findUnique({
+      where: { userId: nannyUserId },
+    });
+    if (!nanny) throw new AppError("Nanny profile not found", 404);
+
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
-    if (!booking || booking.status !== BookingStatus.PENDING_PAYMENT) return;
+    if (!booking) throw new AppError("Booking not found", 404);
+    if (booking.nannyId !== nanny.id)
+      throw new AppError("You are not assigned to this booking", 403);
+    if (booking.status !== BookingStatus.IN_PROGRESS)
+      throw new AppError(
+        "Tasks can only be marked done when booking is in progress",
+        400,
+      );
 
-    await prisma.booking.update({
+    const tasks = (booking.requestedTasks as any[]) ?? [];
+    const taskIndex = tasks.findIndex((t) => t.task === taskName);
+    if (taskIndex === -1)
+      throw new AppError(`Task "${taskName}" not found in this booking`, 404);
+    if (tasks[taskIndex].isDone)
+      throw new AppError(`Task "${taskName}" is already marked as done`, 400);
+
+    tasks[taskIndex] = {
+      ...tasks[taskIndex],
+      isDone: true,
+      doneAt: new Date().toISOString(),
+    };
+    return prisma.booking.update({
       where: { id: bookingId },
-      data: {
-        status: BookingStatus.CONFIRMED,
-        paymentId: paymentId ?? null,
-        timeline: appendTimeline(
-          booking.timeline,
-          BookingStatus.CONFIRMED,
-          "Payment confirmed",
-        ) as any,
-      },
+      data: { requestedTasks: tasks },
     });
-
-    try {
-      const { seeded } = await seedAttendanceRecords(bookingId);
-      log.info(
-        `[handlePaymentCaptured] bookingId=${bookingId} attendanceRowsSeeded=${seeded}`,
-      );
-    } catch (e) {
-      log.error(
-        `[handlePaymentCaptured] attendance seed failed for bookingId=${bookingId}`,
-        e,
-      );
-    }
-
-    // Fire BOOKING_CREATED event NOW (after payment, not at booking creation)
-    // so the FCM to the nanny goes out only when money is secured.
-    bus.emit(Events.BOOKING_CREATED, { bookingId, userId: booking.userId });
-
-    log.info(`Booking ${bookingId} confirmed via payment — nanny notification triggered`);
   }
 
-  async handlePaymentFailed(bookingId: string) {
+  // ── PATCH /api/v1/bookings/:id/daily-plan/task/:taskId ───────────────────
+  async updatePlanTask(
+    nannyUserId: string,
+    bookingId: string,
+    taskId: string,
+    body: { status: "COMPLETED" | "SKIPPED"; notes?: string },
+  ) {
+    const nanny = await prisma.nanny.findUnique({
+      where: { userId: nannyUserId },
+    });
+    if (!nanny) throw new AppError("Nanny profile not found", 404);
+
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
-    if (!booking || booking.status !== BookingStatus.PENDING_PAYMENT) return;
+    if (!booking) throw new AppError("Booking not found", 404);
+    if (booking.nannyId !== nanny.id)
+      throw new AppError("You are not assigned to this booking", 403);
+    if (booking.status !== "IN_PROGRESS")
+      throw new AppError(
+        "Tasks can only be updated when the booking is in progress",
+        400,
+      );
+
+    const task = await prisma.planTask.findUnique({
+      where: { id: taskId },
+      include: { plan: true },
+    });
+    if (!task) throw new AppError(`Task ${taskId} not found`, 404);
+    if (task.plan.bookingId !== bookingId)
+      throw new AppError(
+        "This task does not belong to the specified booking",
+        403,
+      );
+
+    const VALID_STATUSES = ["COMPLETED", "SKIPPED"];
+    if (!VALID_STATUSES.includes(body.status))
+      throw new AppError(
+        `Invalid status "${body.status}". Must be one of: ${VALID_STATUSES.join(", ")}`,
+        400,
+      );
+
+    const updated = await prisma.planTask.update({
+      where: { id: taskId },
+      data: { status: body.status as any, updatedAt: new Date() },
+    });
+
+    if (body.notes) {
+      await prisma.taskLog.upsert({
+        where: { taskId },
+        create: {
+          taskId,
+          nannyId: nanny.id,
+          childrenId: booking.childrenId,
+          nannyNote: body.notes,
+          completedAt: body.status === "COMPLETED" ? new Date() : null,
+        },
+        update: {
+          nannyNote: body.notes,
+          ...(body.status === "COMPLETED" ? { completedAt: new Date() } : {}),
+        },
+      });
+    }
 
     await prisma.booking.update({
       where: { id: bookingId },
       data: {
-        status: BookingStatus.CANCELLED_BY_USER,
-        cancellationReason: "Payment failed or was declined",
         timeline: appendTimeline(
           booking.timeline,
-          BookingStatus.CANCELLED_BY_USER,
-          "Payment failed",
+          BookingStatus.IN_PROGRESS,
+          `Task "${task.title}" marked ${body.status} by nanny`,
         ) as any,
       },
     });
+
+    log.info(
+      `[updatePlanTask] taskId=${taskId} bookingId=${bookingId} status=${body.status}`,
+    );
+    return updated;
+  }
+
+  // ── GET /api/v1/bookings ─────────────────────────────────────────────────
+  async getMyBookings(userId: string, role: string, query: any) {
+    const { page, limit, skip } = paginate(query);
+
+    if (!["USER", "NANNY", "ADMIN", "SUPER_ADMIN"].includes(role))
+      throw new AppError("You do not have permission to view bookings", 403);
+
+    let nannyId: string | undefined;
+    if (role === "NANNY") {
+      const nanny = await prisma.nanny.findUnique({ where: { userId } });
+      if (!nanny) throw new AppError("Nanny profile not found.", 404);
+      nannyId = nanny.id;
+    }
+
+    const baseWhere: any =
+      role === "NANNY" && nannyId ? { nannyId } : { userId };
+
+    if (query.status) {
+      const valid: BookingStatus[] = [
+        BookingStatus.PENDING_PAYMENT,
+        BookingStatus.CONFIRMED,
+        BookingStatus.NANNY_ASSIGNED,
+        BookingStatus.IN_PROGRESS,
+        BookingStatus.COMPLETED,
+        BookingStatus.CANCELLED_BY_USER,
+        BookingStatus.CANCELLED_BY_NANNY,
+        BookingStatus.CANCELLED_BY_ADMIN,
+      ];
+      if (!valid.includes(query.status as BookingStatus))
+        throw new AppError(`Invalid status '${query.status}'`, 400);
+      baseWhere.status = query.status as BookingStatus;
+    }
+
+    const include = {
+      user: {
+        select: { id: true, name: true, mobile: true, profilePhoto: true },
+      },
+      nanny: {
+        select: {
+          id: true,
+          name: true,
+          mobile: true,
+          profilePhoto: true,
+          rating: true,
+        },
+      },
+    };
+
+    if (query.status) {
+      const [bookings, total] = await Promise.all([
+        prisma.booking.findMany({
+          where: baseWhere,
+          skip,
+          take: limit,
+          orderBy: { createdAt: "desc" },
+          include,
+        }),
+        prisma.booking.count({ where: baseWhere }),
+      ]);
+      return paginatedResult(bookings, total, page, limit);
+    }
+
+    const [inProgress, others, total] = await Promise.all([
+      prisma.booking.findMany({
+        where: { ...baseWhere, status: BookingStatus.IN_PROGRESS },
+        orderBy: { updatedAt: "desc" },
+        include,
+      }),
+      prisma.booking.findMany({
+        where: { ...baseWhere, status: { not: BookingStatus.IN_PROGRESS } },
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+        include,
+      }),
+      prisma.booking.count({ where: baseWhere }),
+    ]);
+
+    const merged = [...inProgress, ...others].slice(skip, skip + limit);
+    return paginatedResult(merged, total, page, limit);
+  }
+
+  // ── GET /api/v1/bookings/:id ─────────────────────────────────────────────
+  async getBookingById(bookingId: string, userId: string, role: string) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: {
+        user: {
+          select: { id: true, name: true, mobile: true, profilePhoto: true },
+        },
+        nanny: {
+          select: {
+            id: true,
+            name: true,
+            mobile: true,
+            profilePhoto: true,
+            rating: true,
+          },
+        },
+        dailyPlan: { include: { tasks: true } },
+        requestedDayWiseDailyPlan: { include: { requestedDailyPlan: true } },
+        attendanceRecords: { orderBy: { scheduledDate: "asc" } },
+      },
+    });
+    if (!booking) throw new AppError("Booking not found", 404);
+
+    const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(role);
+    const isOwner = booking.userId === userId;
+    let isNanny = false;
+
+    if (!isOwner && !isAdmin) {
+      const nanny = await prisma.nanny.findUnique({ where: { userId } });
+      isNanny = !!nanny && booking.nannyId === nanny.id;
+      if (!isNanny)
+        throw new AppError("You do not have access to this booking", 403);
+    }
+    return booking;
+  }
+
+  // ── GET /api/v1/bookings/:id/attendance ──────────────────────────────────
+  async getBookingAttendance(
+    bookingId: string,
+    requesterId: string,
+    role: string,
+  ) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
+    if (!booking) throw new AppError("Booking not found", 404);
+
+    const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(role);
+    const isOwner = booking.userId === requesterId;
+    let isNanny = false;
+
+    if (!isOwner && !isAdmin) {
+      const nanny = await prisma.nanny.findUnique({
+        where: { userId: requesterId },
+      });
+      isNanny = !!nanny && booking.nannyId === nanny.id;
+      if (!isNanny) throw new AppError("Access denied", 403);
+    }
+
+    const records = await prisma.attendanceRecord.findMany({
+      where: { bookingId },
+      orderBy: { scheduledDate: "asc" },
+    });
+
+    const summary = {
+      total: records.length,
+      present: records.filter((r) => r.status === AttendanceStatus.PRESENT)
+        .length,
+      late: records.filter((r) => r.status === AttendanceStatus.LATE).length,
+      halfDay: records.filter((r) => r.status === AttendanceStatus.HALF_DAY)
+        .length,
+      absent: records.filter((r) => r.status === AttendanceStatus.ABSENT)
+        .length,
+      pending: records.filter((r) => r.status === AttendanceStatus.PENDING)
+        .length,
+    };
+
+    return { records, summary };
   }
 
   // ── Admin: GET /api/v1/admin/bookings ─────────────────────────────────────
@@ -1458,7 +1482,7 @@ export class BookingService {
     return updated;
   }
 
-  // ── GET /api/v1/bookings/:id/active-shift ────────────────────────────────
+  // ── GET /api/v1/bookings/active-shift ────────────────────────────────────
   async getActiveShift(
     userId: string,
   ): Promise<{ bookingId: string; booking: any } | null> {
@@ -1466,10 +1490,7 @@ export class BookingService {
     if (!nanny) return null;
 
     const booking = await prisma.booking.findFirst({
-      where: {
-        nannyId: nanny.id,
-        status: BookingStatus.IN_PROGRESS,
-      },
+      where: { nannyId: nanny.id, status: BookingStatus.IN_PROGRESS },
       select: {
         id: true,
         serviceType: true,
@@ -1479,9 +1500,8 @@ export class BookingService {
         userId: true,
       },
     });
-
     if (!booking) return null;
-
+    
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
@@ -1494,10 +1514,11 @@ export class BookingService {
         scheduledDate: { gte: today, lt: tomorrow },
       },
     });
-
+    
     if (!todayAttendance?.clockInAt) return null;
     if (todayAttendance.clockOutAt) return null;
-
+    
+    console.log("getActiveShift booking:", booking);
     return { bookingId: booking.id, booking };
   }
 }

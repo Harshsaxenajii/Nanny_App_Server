@@ -41,6 +41,7 @@ enum NannyStatus {
 enum BookingStatus {
   PENDING_PAYMENT
   CONFIRMED
+  PENDING_NANNY_CONFIRMATION
   NANNY_ASSIGNED
   IN_PROGRESS
   COMPLETED
@@ -387,7 +388,7 @@ model Booking {
   userId              String        @db.ObjectId
   nannyId             String?       @db.ObjectId
   childrenId          String        @db.ObjectId
-  status              BookingStatus @default(PENDING_PAYMENT)
+  status              BookingStatus @default(PENDING_NANNY_CONFIRMATION)
   serviceType         ServiceType
   scheduledStartTime  DateTime
   scheduledEndTime    DateTime

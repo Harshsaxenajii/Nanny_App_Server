@@ -125,6 +125,23 @@ router.patch(
   },
 );
 
+router.patch(
+  "/:id/confirm",
+  roles("NANNY"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.json(
+        ok(
+          await service.confirmBooking(req.params.id, req.user!.userId),
+          "Booking confirmed",
+        ),
+      );
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
 // ── PATCH /api/v1/bookings/:id/start ─────────────────────────────────────────
 // Nanny clocks in.
 // Single-day: NANNY_ASSIGNED → IN_PROGRESS
@@ -240,6 +257,26 @@ router.post(
   },
 );
 
+// ── GET /api/v1/bookings/me/active-shift ─────────────────────────────────────
+// Must be BEFORE /:id to prevent "me" being matched as an id param.
+router.get(
+  "/me/active-shift",
+  roles("NANNY"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await service.getActiveShift(req.user!.userId);
+      res.json({
+        success: true,
+        message: result ? "Active shift found" : "No active shift",
+        data: result,
+        statusCode: 200,
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
 // ── GET /api/v1/bookings/:id ─────────────────────────────────────────────────
 // Must be LAST among /:id routes to avoid matching literal segments above.
 router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
@@ -257,25 +294,6 @@ router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {
     next(e);
   }
 });
-
-router.get(
-  "/me/active-shift",
-  auth,
-  roles("NANNY"),
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const result = await service.getActiveShift(req.user!.userId);
-      res.json({
-        success: true,
-        message: result ? "Active shift found" : "No active shift",
-        data: result, // null if no active shift
-        statusCode: 200,
-      });
-    } catch (e) {
-      next(e);
-    }
-  },
-);
 
 router.patch("/:id/reject", auth, roles("NANNY"), async (req, res, next) => {
   try {

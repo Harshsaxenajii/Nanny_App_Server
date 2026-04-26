@@ -12,6 +12,7 @@ export class PaymentService {
   /* ── POST /api/v1/payments/order ────────────────────────────────────── */
   async createOrder(userId: string, bookingId: string) {
     // Edge case: booking must exist
+    console.log("creating order for bookingId:", bookingId);
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
@@ -33,6 +34,7 @@ export class PaymentService {
     const existingPayment = await prisma.payment.findUnique({
       where: { bookingId },
     });
+    console.log(existingPayment, "Existing payment record");
     if (existingPayment && existingPayment.status === "CAPTURED") {
       throw new AppError("Payment already captured for this booking", 400);
     }

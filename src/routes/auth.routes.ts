@@ -69,7 +69,7 @@ router.get("/test-booking-noti/:userId", async (req: Request, res: Response, nex
       childAge:     "2 kids · 3 & 6 yrs",
       distance:     "1.2 km away",
       specialNotes: "Please bring activity books. Kids are allergic to peanuts.",
-      expiresIn:    30,
+      expiresIn:    300,
     });
     res.json(ok(null, "Test booking notification sent!"));
   } catch (e) { next(e); }
