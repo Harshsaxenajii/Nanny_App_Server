@@ -451,4 +451,14 @@ export class UserService {
       },
     });
   }
+
+
+  async getMyPayments(userId: string) {
+    await findUserOrFail(userId);
+    return prisma.payment.findMany({
+      where: {
+        userId: userId,
+      },
+    });
+  }
 }
