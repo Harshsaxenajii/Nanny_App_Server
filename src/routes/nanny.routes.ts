@@ -23,8 +23,8 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
 // ── All routes below require auth ──────────────────────────────────────────
 
 // PATCH /api/v1/nannies/me  ← MUST be before /:id to avoid route conflict
-router.patch('/me', auth, roles('NANNY'), validate(S.nannyUpdate), async (req: Request, res: Response, next: NextFunction) => {
-  console.log("main body",req.body)
+router.patch('/me', auth, roles('NANNY'), async (req: Request, res: Response, next: NextFunction) => {
+  // console.log("main body",req.body)
   try { res.json(ok(await service.updateMyProfile(req.user!.userId, req.body), 'Profile updated')); } catch (e) { next(e); }
 });
 
@@ -43,6 +43,10 @@ router.get('/me/bookings', auth, roles('NANNY'), async (req: Request, res: Respo
 // GET /api/v1/nannies/:id  ← PUBLIC (must be last to avoid consuming /me routes)
 router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
   try { res.json(ok(await service.getPublicProfile(req.params.id))); } catch (e) { next(e); }
+});
+
+router.get('/me/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await service.getMyProf(req.params.id))); } catch (e) { next(e); }
 });
 
 export { router as nannyRouter };

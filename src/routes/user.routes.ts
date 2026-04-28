@@ -112,4 +112,11 @@ router.post('/me/updateEmail', validate(S.deviceToken), async (req: Request, res
   } catch (e) { next(e); }
 });
 
+router.get('/me/payments', async (req: Request, res: Response, next: NextFunction) => {
+
+     try { res.json(ok(await service.getMyPayments(req.user!.userId))); } catch (e) { next(e); }
+
+});
+
+
 export { router as userRouter };

@@ -75,6 +75,7 @@ enum NannyStatus {
 enum BookingStatus {
   PENDING_PAYMENT
   CONFIRMED
+  PENDING_NANNY_CONFIRMATION
   NANNY_ASSIGNED
   IN_PROGRESS
   COMPLETED
@@ -114,7 +115,6 @@ enum MessageType {
   IMAGE
   DOCUMENT
 }
-
 
 enum GoalCategory {
   COGNITIVE
@@ -187,6 +187,12 @@ type TimeSlot {
   endTime   DateTime
   bookingId String?  @db.ObjectId
   isBlock   Boolean  @default(false)
+}
+
+type IdDoc {
+  idName  String?
+  encUrl  String?
+  details Json?   @default("[]")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -325,7 +331,7 @@ model Nanny {
   totalReviews        Int           @default(0)
   ratingData          Json?         @default("[]")
   totalBookings       Int           @default(0)
-  documents           Json          @default("[]")
+  documents           IdDoc[]
   verifiedAt          DateTime?
   verifiedBy          String?
   rejectionReason     String?
@@ -333,10 +339,10 @@ model Nanny {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
   reservedSlot        TimeSlot[]
-
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bookings Booking[] @relation("NannyBookings")
-  taskLogs TaskLog[]
+  idDocumentSubmitted Boolean       @default(false)
+  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings            Booking[]     @relation("NannyBookings")
+  taskLogs            TaskLog[]
 
   @@map("nannies")
 }
@@ -383,13 +389,40 @@ model Children {
 //   Booking → ChildCollectionOfGoals (1:N)
 //           → ChildGoal              (1:N, one per selected goal)
 // ─────────────────────────────────────────────────────────────
+model AttendanceRecord {
+  id            String           @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId     String           @db.ObjectId
+  nannyId       String           @db.ObjectId
+  userId        String           @db.ObjectId // parent, for quick lookup
+  scheduledDate DateTime // midnight UTC of the working day
+  clockInAt     DateTime? // when nanny tapped "Start shift"
+  clockOutAt    DateTime? // when nanny tapped "End shift"
+  status        AttendanceStatus @default(PENDING)
+  lateMinutes   Int              @default(0) // minutes after scheduled start
+  notes         String? // nanny or admin note
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@unique([bookingId, scheduledDate], name: "bookingId_scheduledDate")
+  @@map("attendance_records")
+}
+
+enum AttendanceStatus {
+  PENDING // scheduled but shift hasn't started yet
+  PRESENT // clocked in and out
+  ABSENT // never clocked in (set by nightly cron or admin)
+  LATE // clocked in > 15 min after scheduledStartTime
+  HALF_DAY // clocked out < 50% of expected hours
+}
 
 model Booking {
   id                  String        @id @default(auto()) @map("_id") @db.ObjectId
   userId              String        @db.ObjectId
   nannyId             String?       @db.ObjectId
   childrenId          String        @db.ObjectId
-  status              BookingStatus @default(PENDING_PAYMENT)
+  status              BookingStatus @default(PENDING_NANNY_CONFIRMATION)
   serviceType         ServiceType
   scheduledStartTime  DateTime
   scheduledEndTime    DateTime
@@ -414,6 +447,7 @@ model Booking {
   totalAmount     Float
   razorpayOrderId String?
   paymentId       String?
+  pricingDetails  Json?
 
   // Cancellation
   cancellationReason String?
@@ -452,7 +486,9 @@ model Booking {
   childGoals                ChildGoal[]
 
   // ── AI outputs ────────────────────────────────────────────
-  dailyPlan DailyPlan[]
+  dailyPlan         DailyPlan[]
+  attendanceRecords AttendanceRecord[]
+  workingDays       String[]           @default([])
 
   @@map("bookings")
 }
@@ -511,8 +547,6 @@ model RequestedDailyPlan {
 
   @@map("requested_daily_plans")
 }
-
-
 
 // ─────────────────────────────────────────────────────────────
 // MODELS — Payments & Chat
@@ -641,10 +675,10 @@ model ChildGoal {
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
-  child                    Children                @relation(fields: [childId], references: [id], onDelete: Cascade)
-  planTasks                PlanTask[]
-  booking                  Booking?                @relation(fields: [bookingId], references: [id])
-  bookingId                String?                 @db.ObjectId
+  child     Children   @relation(fields: [childId], references: [id], onDelete: Cascade)
+  planTasks PlanTask[]
+  booking   Booking?   @relation(fields: [bookingId], references: [id])
+  bookingId String?    @db.ObjectId
 
   @@map("child_goals")
 }

@@ -22,6 +22,7 @@ import { locationRouter } from "./routes/location.routes";
 import { chatRouter } from "./routes/chat.routes";
 import { notificationRouter } from "./routes/notification.routes";
 import { adminRouter } from "./routes/admin.routes";
+import { uploadRouter } from "./routes/uploadImages.routes";
 
 import { errorHandler, notFound } from "./middlewares/index";
 // import { seedRouter } from "./routes/seed.routes";
@@ -156,6 +157,8 @@ app.use("/api/v1/goals", goalRouter);
 
 // PlanRouter API
 app.use("/api/v1/plan", planRouter);
+app.use("/api/v1/admin", adminRouter);
+app.use("/api/v1/encrypted", uploadRouter);
 
 /* ── 404 + error handler ────────────────────────────────────────────────── */
 app.use(notFound);
