@@ -277,6 +277,24 @@ router.get(
   },
 );
 
+router.get(
+  "/me/live-status",
+  roles("USER"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await service.getUserLiveStatus(req.user!.userId);
+      res.json({
+        success: true,
+        message: result ? "Live session active" : "No active session",
+        data: result,
+        statusCode: 200,
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
 // ── GET /api/v1/bookings/:id ─────────────────────────────────────────────────
 // Must be LAST among /:id routes to avoid matching literal segments above.
 router.get("/:id", async (req: Request, res: Response, next: NextFunction) => {

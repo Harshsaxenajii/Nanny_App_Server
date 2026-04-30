@@ -1501,7 +1501,7 @@ export class BookingService {
       },
     });
     if (!booking) return null;
-    
+
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
@@ -1514,11 +1514,137 @@ export class BookingService {
         scheduledDate: { gte: today, lt: tomorrow },
       },
     });
-    
+
     if (!todayAttendance?.clockInAt) return null;
     if (todayAttendance.clockOutAt) return null;
-    
-    console.log("getActiveShift booking:", booking);
+
+    // console.log("getActiveShift booking:", booking);
     return { bookingId: booking.id, booking };
+  }
+
+  async getUserLiveStatus(userId: string): Promise<{
+    bookingId: string;
+    nannyName: string;
+    nannyPhoto: string | null;
+    clockedInAt: Date;
+    totalTasks: number;
+    completedTasks: number;
+    pendingTasks: number;
+    skippedTasks: number;
+    tasks: {
+      id: string;
+      title: string;
+      category: string;
+      scheduledTime: string;
+      durationMinutes: number;
+      status: string;
+      completionPct: number | null;
+    }[];
+  } | null> {
+    // ── Step 1: Find an active booking for this user ───────────────────────
+    const booking = await prisma.booking.findFirst({
+      where: {
+        userId,
+        status: {
+          in: [
+            BookingStatus.IN_PROGRESS,
+            BookingStatus.CONFIRMED,
+            BookingStatus.NANNY_ASSIGNED,
+          ],
+        },
+      },
+      select: {
+        id: true,
+        nanny: { select: { id: true, name: true, profilePhoto: true } },
+      },
+    });
+
+    if (!booking || !booking.nanny) return null;
+
+    // ── Step 2: Check nanny is clocked in and NOT yet clocked out today ────
+    // Attendance rows use scheduledDate = UTC midnight, so this query is fine.
+    const utcToday = new Date();
+    utcToday.setUTCHours(0, 0, 0, 0);
+    const utcTomorrow = new Date(utcToday);
+    utcTomorrow.setUTCDate(utcTomorrow.getUTCDate() + 1);
+
+    const attendance = await prisma.attendanceRecord.findFirst({
+      where: {
+        bookingId: booking.id,
+        nannyId: booking.nanny.id,
+        scheduledDate: { gte: utcToday, lt: utcTomorrow },
+      },
+    });
+
+    // Not clocked in yet, or already clocked out → no live status
+    if (!attendance?.clockInAt) return null;
+    if (attendance?.clockOutAt) return null;
+
+    // ── Step 3: IST-aware date window for today's tasks ───────────────────
+    //
+    // IST = UTC + 5h 30m
+    // "Today in IST" starts at  [utcToday - 5h30m]  i.e. yesterday 18:30 UTC
+    // "Today in IST" ends at    [utcToday + 18h30m] i.e. today     18:30 UTC
+    //
+    // Example for 30 Apr IST:
+    //   todayISTStartUTC = 2026-04-29T18:30:00.000Z  (= 30 Apr 00:00 IST)
+    //   todayISTEndUTC   = 2026-04-30T18:30:00.000Z  (= 01 May 00:00 IST)
+    //
+    // Tasks stored for "30 Apr IST" have forDate = 2026-04-29T18:30:00.000Z
+    // which falls inside [todayISTStartUTC, todayISTEndUTC) → correctly included.
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 19800000 ms
+    const todayISTStartUTC = new Date(utcToday.getTime() - IST_OFFSET_MS);
+    const todayISTEndUTC = new Date(
+      todayISTStartUTC.getTime() + 24 * 60 * 60 * 1000,
+    );
+
+    // ── Step 4: Fetch the AI daily plan for this booking ──────────────────
+    const dailyPlan = await prisma.dailyPlan.findUnique({
+      where: { bookingId: booking.id },
+    });
+
+    // ── Step 5: Fetch today's tasks using IST window ───────────────────────
+    const tasks = dailyPlan
+      ? await prisma.planTask.findMany({
+          where: {
+            planId: dailyPlan.id,
+            forDate: {
+              gte: todayISTStartUTC, // 29 Apr 18:30 UTC = 30 Apr 00:00 IST
+              lt: todayISTEndUTC, // 30 Apr 18:30 UTC = 01 May 00:00 IST
+            },
+          },
+          include: { log: true },
+          orderBy: { scheduledTime: "asc" },
+        })
+      : [];
+
+    // ── Step 6: Map to response shape ─────────────────────────────────────
+    const mapped = tasks.map((t) => ({
+      id: t.id,
+      title: t.title,
+      category: t.category,
+      scheduledTime: t.scheduledTime,
+      durationMinutes: t.durationMinutes,
+      status: t.status,
+      completionPct: t.log?.completionPct ?? null,
+    }));
+
+    log.info(
+      `[getUserLiveStatus] userId=${userId} bookingId=${booking.id}` +
+        ` tasks=${mapped.length} clocked_in=${attendance.clockInAt.toISOString()}` +
+        ` IST_window=[${todayISTStartUTC.toISOString()}, ${todayISTEndUTC.toISOString()})`,
+    );
+
+    return {
+      bookingId: booking.id,
+      nannyName: booking.nanny.name,
+      nannyPhoto: booking.nanny.profilePhoto,
+      clockedInAt: attendance.clockInAt,
+      totalTasks: mapped.length,
+      completedTasks: mapped.filter((t) => t.status === "COMPLETED").length,
+      pendingTasks: mapped.filter((t) => t.status === "PENDING").length,
+      skippedTasks: mapped.filter((t) => t.status === "SKIPPED").length,
+      tasks: mapped,
+    };
   }
 }
