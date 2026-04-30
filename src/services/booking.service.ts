@@ -1328,40 +1328,57 @@ export class BookingService {
 
   // ── GET /api/v1/bookings/:id ─────────────────────────────────────────────
   async getBookingById(bookingId: string, userId: string, role: string) {
+    // IST window: todayISTStartUTC = today 00:00 IST in UTC
+    const IST_OFFSET_MS    = 5.5 * 60 * 60 * 1000;
+    const utcToday         = new Date();
+    utcToday.setUTCHours(0, 0, 0, 0);
+    const todayISTStartUTC = new Date(utcToday.getTime() - IST_OFFSET_MS);
+    const todayISTEndUTC   = new Date(todayISTStartUTC.getTime() + 24 * 60 * 60 * 1000);
+ 
+    // Fetch booking — dailyPlan without tasks (we filter tasks separately below)
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
       include: {
-        user: {
-          select: { id: true, name: true, mobile: true, profilePhoto: true },
-        },
-        nanny: {
-          select: {
-            id: true,
-            name: true,
-            mobile: true,
-            profilePhoto: true,
-            rating: true,
-          },
-        },
-        dailyPlan: { include: { tasks: true } },
+        user:  { select: { id: true, name: true, mobile: true, profilePhoto: true } },
+        nanny: { select: { id: true, name: true, mobile: true, profilePhoto: true, rating: true } },
+        childGoals:                true,
+        dailyPlan:                 true,
         requestedDayWiseDailyPlan: { include: { requestedDailyPlan: true } },
-        attendanceRecords: { orderBy: { scheduledDate: "asc" } },
+        attendanceRecords:         { orderBy: { scheduledDate: "asc" } },
       },
     });
     if (!booking) throw new AppError("Booking not found", 404);
-
+ 
     const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(role);
     const isOwner = booking.userId === userId;
-    let isNanny = false;
-
+    let   isNanny = false;
+ 
     if (!isOwner && !isAdmin) {
       const nanny = await prisma.nanny.findUnique({ where: { userId } });
       isNanny = !!nanny && booking.nannyId === nanny.id;
-      if (!isNanny)
-        throw new AppError("You do not have access to this booking", 403);
+      if (!isNanny) throw new AppError("You do not have access to this booking", 403);
     }
-    return booking;
+ 
+    // Fetch today's tasks with IST window and stitch onto dailyPlan[0].tasks
+    const plan = booking.dailyPlan?.[0] ?? null;
+    const todayTasks = plan
+      ? await prisma.planTask.findMany({
+          where: {
+            planId:  plan.id,
+            forDate: { gte: todayISTStartUTC, lt: todayISTEndUTC },
+          },
+          orderBy: { scheduledTime: "asc" },
+        })
+      : [];
+ 
+    return {
+      ...booking,
+      dailyPlan: booking.dailyPlan.map((p) =>
+        p.id === plan?.id ? { ...p, tasks: todayTasks } : { ...p, tasks: [] },
+      ),
+    };
   }
+ 
 
   // ── GET /api/v1/bookings/:id/attendance ──────────────────────────────────
   async getBookingAttendance(
