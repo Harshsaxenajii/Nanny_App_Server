@@ -24,7 +24,7 @@ export async function runDailyPlanJob() {
   log.info('Daily plan job started');
 
   const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  today.setUTCHours(0, 0, 0, 0);
 
   // Find all bookings that:
   //   1. Are currently active (today falls within the booking range)
@@ -36,7 +36,7 @@ export async function runDailyPlanJob() {
       scheduledStartTime: { lte: today },
       scheduledEndTime:   { gte: today },
       status: {
-        in: ['CONFIRMED', 'NANNY_ASSIGNED', 'IN_PROGRESS'],
+        in: ['CONFIRMED', 'IN_PROGRESS'],
       },
     },
     select: { id: true },

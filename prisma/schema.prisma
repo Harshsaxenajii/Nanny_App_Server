@@ -356,6 +356,7 @@ model Children {
   disabilityNotes String?
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
+  developmentSummary Json?
 
   user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   bookings   Booking[]
@@ -363,6 +364,7 @@ model Children {
   dailyPlans DailyPlan[]
   planTasks  PlanTask[]
   taskLogs   TaskLog[]
+  developmentLogs ChildDevelopmentLog[]
 
   @@map("childrens")
 }
@@ -616,6 +618,37 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+
+//MODEL -- ChildCollectionOfGoals
+// This model represents the collection of goals associated with a booking.
+// It serves as a parent to the ChildGoal model, allowing us to group multiple goals under
+// a single booking. Each ChildCollectionOfGoals is linked to one Booking, and each ChildGoal belongs to one ChildCollectionOfGoals.
+
+model ChildDevelopmentLog {
+  id               String       @id @default(auto()) @map("_id") @db.ObjectId
+  childId          String       @db.ObjectId
+  goalId           String?      @db.ObjectId
+  category         GoalCategory
+  weekNumber       Int
+  progressPct      Int          @default(0)
+  milestoneReached Boolean      @default(false)
+  aiObservation    String?
+  aiSummary        String?
+  totalTasks       Int          @default(0)
+  completedTasks   Int          @default(0)
+  skippedTasks     Int          @default(0)
+  avgCompletionPct Int          @default(0)
+  avgEngagement    Int?
+  avgMood          Int?
+  loggedAt         DateTime     @default(now())
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  child   Children   @relation(fields: [childId],  references: [id], onDelete: Cascade)
+  goal    ChildGoal? @relation(fields: [goalId],    references: [id])
+
+  @@map("child_development_logs")
+}
 // ─────────────────────────────────────────────────────────────
 // MODEL — ChildGoal
 //
@@ -630,9 +663,9 @@ model AuditLog {
 // ─────────────────────────────────────────────────────────────
 
 model ChildGoal {
-  id                String       @id @default(auto()) @map("_id") @db.ObjectId
   childId           String       @db.ObjectId
   name              String
+  id                String       @id @default(auto()) @map("_id") @db.ObjectId
   category          GoalCategory
   priority          GoalPriority @default(MEDIUM)
   timelineMonths    Int?
@@ -640,6 +673,9 @@ model ChildGoal {
   milestones        Json         @default("[]")
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
+  currentMilestoneWeek Int      @default(1)
+  completionPct     Int       @default(0)
+  developmentLogs   ChildDevelopmentLog[]
 
   child                    Children                @relation(fields: [childId], references: [id], onDelete: Cascade)
   planTasks                PlanTask[]
