@@ -23,12 +23,12 @@ export class PaymentService {
       throw new AppError("You do not have access to this booking", 403);
 
     // Edge case: booking must be in PENDING_PAYMENT state
-    if (booking.status !== BookingStatus.PENDING_PAYMENT) {
-      throw new AppError(
-        `Payment cannot be initiated for a booking in status: ${booking.status}`,
-        400,
-      );
-    }
+    // if (booking.status !== BookingStatus.PENDING_PAYMENT) {
+    //   throw new AppError(
+    //     `Payment cannot be initiated for a booking in status: ${booking.status}`,
+    //     400,
+    //   );
+    // }
 
     // Edge case: check if payment record already exists
     const existingPayment = await prisma.payment.findUnique({
@@ -119,6 +119,69 @@ export class PaymentService {
     }
   }
 
+  async addReservedSlot(
+    nannyId: string,
+    bookingId: string,
+    startTime: Date,
+    endTime: Date,
+  ): Promise<void> {
+    try {
+      const nanny = await prisma.nanny.findUnique({
+        where: { id: nannyId },
+        select: { reservedSlot: true },
+      });
+      if (!nanny) return;
+
+      const existing = (nanny.reservedSlot as any[]) ?? [];
+      // Avoid duplicates
+      if (existing.some((s: any) => s.bookingId === bookingId)) return;
+
+      await prisma.nanny.update({
+        where: { id: nannyId },
+        data: {
+          reservedSlot: [
+            ...existing,
+            { startTime, endTime, bookingId, isBlock: false },
+          ],
+        },
+      });
+      log.info(`[addReservedSlot] nannyId=${nannyId} bookingId=${bookingId}`);
+    } catch (e) {
+      log.error(
+        `[addReservedSlot] failed nannyId=${nannyId} bookingId=${bookingId}`,
+        e,
+      );
+    }
+  }
+
+  /** Removes a booking's slot from nanny.reservedSlot when cancelled or completed. */
+  async removeReservedSlot(nannyId: string, bookingId: string): Promise<void> {
+    try {
+      const nanny = await prisma.nanny.findUnique({
+        where: { id: nannyId },
+        select: { reservedSlot: true },
+      });
+      if (!nanny) return;
+
+      const filtered = ((nanny.reservedSlot as any[]) ?? []).filter(
+        (s: any) => s.bookingId !== bookingId,
+      );
+
+      await prisma.nanny.update({
+        where: { id: nannyId },
+        data: { reservedSlot: filtered },
+      });
+      log.info(
+        `[removeReservedSlot] nannyId=${nannyId} bookingId=${bookingId}`,
+      );
+    } catch (e) {
+      log.error(
+        `[removeReservedSlot] failed nannyId=${nannyId} bookingId=${bookingId}`,
+        e,
+      );
+    }
+  }
+
   /* ── POST /api/v1/payments/verify ───────────────────────────────────── */
   async verifyPayment(
     userId: string,
@@ -171,6 +234,20 @@ export class PaymentService {
         capturedAt: new Date(),
       },
     });
+
+    const booking = await prisma.booking.findUnique({
+      where: {
+        id: payment.bookingId,
+      },
+    });
+    console.log(booking)
+    // if (
+    //   booking?.nannyId &&
+    //   (booking.status === BookingStatus.CONFIRMED ||
+    //     booking.status === BookingStatus.IN_PROGRESS)
+    // ) {
+    //   await this.removeReservedSlot(booking.nannyId, payment.bookingId);
+    // }
 
     bus.emit(Events.PAYMENT_CAPTURED, {
       bookingId: payment.bookingId,

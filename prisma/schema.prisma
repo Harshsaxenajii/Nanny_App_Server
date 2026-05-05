@@ -732,3 +732,14 @@ model TaskLog {
 
   @@map("task_logs")
 }
+
+model ReportBug {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  issueName   String?
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  userId      String?
+
+  @@map("report_bug")
+}

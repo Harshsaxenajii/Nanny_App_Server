@@ -167,6 +167,7 @@ export const S = {
     specialInstructions: Joi.string().max(500).allow("", null),
     requestedTasks: Joi.array().items(Joi.string()).default([]),
     childrenId: Joi.string().required(),
+    lunch: Joi.boolean().default(false),
     address: Joi.object({
       label: Joi.string(),
       addressLine1: Joi.string().required(),

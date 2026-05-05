@@ -4,32 +4,33 @@ import { createLogger } from "../utils/logger";
 import { bus, Events } from "../utils/eventBus";
 import { paginate, paginatedResult } from "../utils/response";
 import { AttendanceStatus, BookingStatus, NannyStatus } from "@prisma/client";
+import {
+  calcPricing,
+  calcSessionHours,
+  getWorkingDates,
+  isRangeType,
+  validateCoupon,
+  MAX_SESSION_HOURS,
+  LATE_THRESHOLD_MINUTES,
+  HALF_DAY_THRESHOLD_PCT,
+  DEFAULT_MONTHLY_WORKING_DAYS,
+} from "../utils/pricing";
+
+// Re-export for any callers that imported these from this module directly
+export { validateCoupon } from "../utils/pricing";
 
 const log = createLogger("booking");
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CONSTANTS  (keep in sync with frontend)
+// STATUS LIFECYCLE
+//
+//   PENDING_NANNY_CONFIRMATION  → booking created, nanny must accept/reject
+//   PENDING_PAYMENT             → nanny accepted, user must pay
+//   CONFIRMED                   → payment received, ready to start
+//   IN_PROGRESS                 → nanny clocked in
+//   COMPLETED                   → service done (final clock-out)
+//
 // ─────────────────────────────────────────────────────────────────────────────
-const LATE_THRESHOLD_MINUTES = 15;
-const HALF_DAY_THRESHOLD_PCT = 0.5;
-const DAILY_RATE_HOURS = 9;
-const EMERGENCY_SURCHARGE_PER_HR = 100;
-const PLATFORM_FEE_PCT = 0.05;
-const GST_PCT = 0.05;
-const MONTHLY_WORKING_DAYS = 20;
-const MAX_SESSION_HOURS = 36;
-
-const RANGE_TYPES = ["FULL_TIME", "PART_TIME", "MONTHLY_SUBSCRIPTION"] as const;
-const SINGLE_DAY_TYPES = ["ONE_TIME", "OVERNIGHT", "EMERGENCY"] as const;
-
-const COUPON_CATALOGUE: Record<
-  string,
-  { discountPct: number; description: string }
-> = {
-  FIRSTCARE: { discountPct: 0.2, description: "20% off your first booking" },
-  MOM20: { discountPct: 0.2, description: "20% off for MOM members" },
-  NANNY10: { discountPct: 0.1, description: "10% off any booking" },
-};
 
 const CANCELLED_STATUSES = [
   BookingStatus.CANCELLED_BY_USER,
@@ -41,6 +42,7 @@ const CANCELLED_STATUSES = [
 // ─────────────────────────────────────────────────────────────────────────────
 // SMALL UTILITIES
 // ─────────────────────────────────────────────────────────────────────────────
+
 type TimelineEntry = { status: string; at: string; note?: string };
 
 function appendTimeline(
@@ -57,18 +59,81 @@ function appendTimeline(
   return list;
 }
 
-/** Cross-midnight-safe session length in hours. */
-function calcSessionHours(startTime: Date, endTime: Date): number {
-  let diff = (endTime.getTime() - startTime.getTime()) / 3_600_000;
-  if (diff <= 0) diff += 24;
-  return diff;
+// ─────────────────────────────────────────────────────────────────────────────
+// RESERVED SLOT MANAGEMENT
+// These helpers keep nanny.reservedSlot in sync with confirmed bookings so
+// the explore/search route can filter out unavailable nannies.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Adds a time slot to nanny.reservedSlot when a booking is confirmed. */
+async function addReservedSlot(
+  nannyId: string,
+  bookingId: string,
+  startTime: Date,
+  endTime: Date,
+): Promise<void> {
+  try {
+    const nanny = await prisma.nanny.findUnique({
+      where: { id: nannyId },
+      select: { reservedSlot: true },
+    });
+    if (!nanny) return;
+
+    const existing = (nanny.reservedSlot as any[]) ?? [];
+    // Avoid duplicates
+    if (existing.some((s: any) => s.bookingId === bookingId)) return;
+
+    await prisma.nanny.update({
+      where: { id: nannyId },
+      data: {
+        reservedSlot: [
+          ...existing,
+          { startTime, endTime, bookingId, isBlock: false },
+        ],
+      },
+    });
+    log.info(`[addReservedSlot] nannyId=${nannyId} bookingId=${bookingId}`);
+  } catch (e) {
+    log.error(
+      `[addReservedSlot] failed nannyId=${nannyId} bookingId=${bookingId}`,
+      e,
+    );
+  }
+}
+
+/** Removes a booking's slot from nanny.reservedSlot when cancelled or completed. */
+async function removeReservedSlot(
+  nannyId: string,
+  bookingId: string,
+): Promise<void> {
+  try {
+    const nanny = await prisma.nanny.findUnique({
+      where: { id: nannyId },
+      select: { reservedSlot: true },
+    });
+    if (!nanny) return;
+
+    const filtered = ((nanny.reservedSlot as any[]) ?? []).filter(
+      (s: any) => s.bookingId !== bookingId,
+    );
+
+    await prisma.nanny.update({
+      where: { id: nannyId },
+      data: { reservedSlot: filtered },
+    });
+    log.info(`[removeReservedSlot] nannyId=${nannyId} bookingId=${bookingId}`);
+  } catch (e) {
+    log.error(
+      `[removeReservedSlot] failed nannyId=${nannyId} bookingId=${bookingId}`,
+      e,
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ATTENDANCE HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Returns today's AttendanceRecord for this booking + nanny, or null. */
 async function getTodayAttendance(bookingId: string, nannyId: string) {
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
@@ -76,18 +141,13 @@ async function getTodayAttendance(bookingId: string, nannyId: string) {
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
 
   return prisma.attendanceRecord.findFirst({
-    where: {
-      bookingId,
-      nannyId,
-      scheduledDate: { gte: today, lt: tomorrow },
-    },
+    where: { bookingId, nannyId, scheduledDate: { gte: today, lt: tomorrow } },
   });
 }
 
 /**
  * Pre-creates PENDING attendance rows for every working day in the booking.
- * Called after payment is captured (CONFIRMED → NANNY_ASSIGNED).
- * Safe to call multiple times — upserts by (bookingId, scheduledDate) unique key.
+ * Called after payment is captured. Safe to call multiple times — upserts.
  */
 async function seedAttendanceRecords(
   bookingId: string,
@@ -95,55 +155,20 @@ async function seedAttendanceRecords(
   const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
   if (!booking || !booking.nannyId) return { seeded: 0 };
 
-  const isRange = RANGE_TYPES.includes(booking.serviceType as any);
-
-  if (!isRange) {
-    const date = new Date(booking.scheduledStartTime);
-    date.setUTCHours(0, 0, 0, 0);
-
-    await prisma.attendanceRecord.upsert({
-      where: { bookingId_scheduledDate: { bookingId, scheduledDate: date } },
-      create: {
-        bookingId,
-        nannyId: booking.nannyId,
-        userId: booking.userId,
-        scheduledDate: date,
-        status: AttendanceStatus.PENDING,
-      },
-      update: {},
-    });
-    return { seeded: 1 };
-  }
-
-  const DAY_MAP: Record<string, number> = {
-    MON: 1,
-    TUE: 2,
-    WED: 3,
-    THU: 4,
-    FRI: 5,
-    SAT: 6,
-    SUN: 0,
-  };
-
+  const isRange = isRangeType(booking.serviceType);
   const workingDayNames: string[] = (booking as any).workingDays ?? [];
-  const activeDayNums = new Set(
-    workingDayNames.map((d) => DAY_MAP[d.toUpperCase().trim()] ?? -1),
-  );
 
-  const startStr = booking.scheduledStartTime.toISOString().split("T")[0];
-  const endStr = booking.scheduledEndTime.toISOString().split("T")[0];
-  const cur = new Date(`${startStr}T12:00:00.000Z`);
-  const ceil = new Date(`${endStr}T23:59:59.999Z`);
-
-  const dates: Date[] = [];
-  while (cur <= ceil) {
-    if (activeDayNums.size === 0 || activeDayNums.has(cur.getUTCDay())) {
-      const d = new Date(cur);
-      d.setUTCHours(0, 0, 0, 0);
-      dates.push(d);
-    }
-    cur.setUTCDate(cur.getUTCDate() + 1);
-  }
+  const dates = isRange
+    ? getWorkingDates(
+        booking.scheduledStartTime,
+        booking.scheduledEndTime,
+        workingDayNames,
+      )
+    : (() => {
+        const d = new Date(booking.scheduledStartTime);
+        d.setUTCHours(0, 0, 0, 0);
+        return [d];
+      })();
 
   await Promise.all(
     dates.map((scheduledDate) =>
@@ -166,149 +191,14 @@ async function seedAttendanceRecords(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PRICING ENGINE
-// ─────────────────────────────────────────────────────────────────────────────
-interface PricingInput {
-  serviceType: string;
-  hourlyRate: number;
-  dailyRate: number | null;
-  startTime: Date;
-  endTime: Date;
-  workingDays?: number;
-  couponCode?: string;
-  goalsFee?: number;
-}
-interface PricingOutput {
-  sessionHours: number;
-  workingDays: number;
-  baseFee: number;
-  emergencySurcharge: number;
-  couponCode: string | null;
-  discount: number;
-  discountedBase: number;
-  platformFee: number;
-  gst: number;
-  goalsFee: number;
-  total: number;
-  description: string;
-}
-
-export function calcPricingV2(input: PricingInput): PricingOutput {
-  const {
-    serviceType,
-    hourlyRate,
-    dailyRate,
-    startTime,
-    endTime,
-    workingDays: inputDays,
-    couponCode,
-    goalsFee = 0,
-  } = input;
-
-  if (isNaN(startTime.getTime()) || isNaN(endTime.getTime()))
-    throw new AppError(
-      "Invalid startTime or endTime passed to pricing engine",
-      500,
-    );
-
-  const sessionHours = calcSessionHours(startTime, endTime);
-  const isRange = RANGE_TYPES.includes(serviceType as any);
-  const workingDays = isRange ? (inputDays ?? MONTHLY_WORKING_DAYS) : 1;
-
-  let baseFee = 0;
-  let emergencySurcharge = 0;
-  let description = "";
-
-  if (serviceType === "ONE_TIME" || serviceType === "OVERNIGHT") {
-    baseFee = sessionHours * hourlyRate;
-    description = `${sessionHours.toFixed(1)} hrs × ₹${hourlyRate}/hr`;
-  } else if (serviceType === "EMERGENCY") {
-    emergencySurcharge = sessionHours * EMERGENCY_SURCHARGE_PER_HR;
-    baseFee = sessionHours * hourlyRate + emergencySurcharge;
-    description = `${sessionHours.toFixed(1)} hrs × ₹${hourlyRate}/hr + ₹${EMERGENCY_SURCHARGE_PER_HR}/hr emergency surcharge`;
-  } else if (isRange) {
-    const effectiveDailyRate =
-      dailyRate && dailyRate > 0 ? dailyRate : hourlyRate * DAILY_RATE_HOURS;
-    if (sessionHours <= DAILY_RATE_HOURS) {
-      baseFee = effectiveDailyRate * workingDays;
-      description = `₹${effectiveDailyRate}/day × ${workingDays} days`;
-    } else {
-      const overtimeHrs = sessionHours - DAILY_RATE_HOURS;
-      const dailyCost = effectiveDailyRate + overtimeHrs * hourlyRate;
-      baseFee = dailyCost * workingDays;
-      description = `(₹${effectiveDailyRate}/day + ${overtimeHrs.toFixed(1)} OT hrs × ₹${hourlyRate}/hr) × ${workingDays} days`;
-    }
-  } else {
-    baseFee = sessionHours * hourlyRate;
-    description = `${sessionHours.toFixed(1)} hrs × ₹${hourlyRate}/hr`;
-  }
-
-  let discount = 0;
-  let appliedCode: string | null = null;
-  if (couponCode) {
-    const key = couponCode.toUpperCase().trim();
-    const coupon = COUPON_CATALOGUE[key];
-    if (coupon) {
-      discount = Math.round(baseFee * coupon.discountPct);
-      appliedCode = key;
-    }
-  }
-
-  const discountedBase = baseFee - discount;
-  const platformFee = Math.round(discountedBase * PLATFORM_FEE_PCT);
-  const gst = Math.round(discountedBase * GST_PCT);
-  const total = discountedBase + platformFee + gst + goalsFee;
-
-  log.info(
-    `[calcPricingV2] ${serviceType} | sessionHours=${sessionHours.toFixed(2)} | workingDays=${workingDays}` +
-      ` | baseFee=₹${baseFee} | discount=₹${discount} | total=₹${total}`,
-  );
-
-  return {
-    sessionHours,
-    workingDays,
-    baseFee,
-    emergencySurcharge,
-    couponCode: appliedCode,
-    discount,
-    discountedBase,
-    platformFee,
-    gst,
-    goalsFee,
-    total,
-    description,
-  };
-}
-
-export function validateCoupon(code: string): {
-  valid: boolean;
-  description?: string;
-} {
-  const key = code.toUpperCase().trim();
-  const coupon = COUPON_CATALOGUE[key];
-  return coupon
-    ? { valid: true, description: coupon.description }
-    : { valid: false };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // BOOKING SERVICE
-//
-// STATUS LIFECYCLE (correct flow):
-//
-//   PENDING_PAYMENT   → booking created, awaiting nanny confirmation
-//   CONFIRMED         → nanny accepted, awaiting user payment
-//   NANNY_ASSIGNED    → payment received, ready to start
-//   IN_PROGRESS       → nanny clocked in, service running
-//   COMPLETED         → service finished
-//
 // ─────────────────────────────────────────────────────────────────────────────
+
 export class BookingService {
   // ── POST /api/v1/bookings ────────────────────────────────────────────────
-  // Creates booking as PENDING_PAYMENT (waiting for nanny to confirm).
-  // Immediately emits BOOKING_CREATED so the nanny gets the FCM push.
-  // No payment is involved at this point.
   async createBooking(userId: string, body: any) {
+    // ── 1. Validate user & basic inputs ─────────────────────────────────────
+    console.log("called booking service createbooking");
     const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new AppError("User not found", 404);
 
@@ -318,8 +208,11 @@ export class BookingService {
     if (isNaN(start.getTime()) || isNaN(end.getTime()))
       throw new AppError("Invalid scheduledStartTime or scheduledEndTime", 400);
 
+    if (start <= new Date())
+      throw new AppError("scheduledStartTime must be in the future", 400);
+
     const sessionMs = end.getTime() - start.getTime();
-    const isRangeType = RANGE_TYPES.includes(body.serviceType);
+    const isRange = isRangeType(body.serviceType);
 
     if (sessionMs <= 0)
       throw new AppError(
@@ -327,16 +220,15 @@ export class BookingService {
           "For cross-midnight sessions the end time must be on the following calendar day.",
         400,
       );
-
-    if (!isRangeType && sessionMs > MAX_SESSION_HOURS * 3_600_000)
+    console.log("tag 1");
+    if (!isRange && sessionMs > MAX_SESSION_HOURS * 3_600_000)
       throw new AppError(
         `Session cannot exceed ${MAX_SESSION_HOURS} hours.`,
         400,
       );
 
-    if (start <= new Date())
-      throw new AppError("scheduledStartTime must be in the future", 400);
-
+    console.log("tag 2");
+    // ── 2. Validate child ────────────────────────────────────────────────────
     const child = await prisma.children.findUnique({
       where: { id: body.childrenId },
     });
@@ -344,8 +236,10 @@ export class BookingService {
     if (child.userId !== userId)
       throw new AppError("This child does not belong to your account", 403);
 
+    // ── 3. Validate nanny (if specified) ────────────────────────────────────
     let nannyId: string | null = null;
     let nanny: any = null;
+    console.log("tag 3");
 
     if (body.nannyId) {
       nanny = await prisma.nanny.findUnique({ where: { id: body.nannyId } });
@@ -361,12 +255,35 @@ export class BookingService {
           `This nanny does not offer ${body.serviceType}.`,
           400,
         );
+      if (!nanny.hourlyRate || nanny.hourlyRate <= 0)
+        throw new AppError(
+          "This nanny does not have a valid hourly rate configured.",
+          400,
+        );
+
+      // Check nanny is not already booked for this time slot
+      const conflict = ((nanny.reservedSlot as any[]) ?? []).some(
+        (slot: any) => {
+          const slotStart = new Date(slot.startTime).getTime();
+          const slotEnd = new Date(slot.endTime).getTime();
+          return slotStart < end.getTime() && slotEnd > start.getTime();
+        },
+      );
+      if (conflict)
+        throw new AppError(
+          "This nanny is already booked during the requested time.",
+          409,
+        );
+
       nannyId = nanny.id;
     }
 
+    // ── 4. Validate coupon ───────────────────────────────────────────────────
     if (body.couponCode && !validateCoupon(body.couponCode).valid)
       throw new AppError("Invalid or expired coupon code", 400);
 
+    console.log("tag 4");
+    // ── 5. Goals fee ─────────────────────────────────────────────────────────
     const selectedGoals: any[] = Array.isArray(body.selectedGoals)
       ? body.selectedGoals
       : [];
@@ -375,41 +292,21 @@ export class BookingService {
       0,
     );
 
-    let billingWorkingDays = MONTHLY_WORKING_DAYS;
-    if (
-      isRangeType &&
-      Array.isArray(body.workingDays) &&
-      body.workingDays.length > 0
-    ) {
-      const DAY_MAP: Record<string, number> = {
-        MON: 1,
-        TUE: 2,
-        WED: 3,
-        THU: 4,
-        FRI: 5,
-        SAT: 6,
-        SUN: 0,
-      };
-      const activeDayNums = new Set(
-        body.workingDays.map(
-          (d: string) => DAY_MAP[d.toUpperCase().trim()] ?? -1,
-        ),
-      );
-      let count = 0;
-      const startStr = start.toISOString().split("T")[0];
-      const endStr = end.toISOString().split("T")[0];
-      const cur = new Date(`${startStr}T12:00:00.000Z`);
-      const ceil = new Date(`${endStr}T23:59:59.999Z`);
-      while (cur <= ceil) {
-        if (activeDayNums.has(cur.getUTCDay())) count++;
-        cur.setUTCDate(cur.getUTCDate() + 1);
-      }
-      billingWorkingDays = count > 0 ? count : MONTHLY_WORKING_DAYS;
+    // ── 6. Resolve working days & shift window ───────────────────────────────
+    const workingDayNames: string[] =
+      isRange && Array.isArray(body.workingDays) ? body.workingDays : [];
+
+    // Count actual working days for billing
+    let billingWorkingDays = DEFAULT_MONTHLY_WORKING_DAYS;
+    if (isRange && workingDayNames.length > 0) {
+      const count = getWorkingDates(start, end, workingDayNames).length;
+      billingWorkingDays = count > 0 ? count : DEFAULT_MONTHLY_WORKING_DAYS;
     }
 
+    // For range bookings a separate daily shift window may be provided
     let shiftStart = start;
     let shiftEnd = end;
-    if (isRangeType && body.dailyStartTime && body.dailyEndTime) {
+    if (isRange && body.dailyStartTime && body.dailyEndTime) {
       const dS = new Date(body.dailyStartTime);
       const dE = new Date(body.dailyEndTime);
       if (!isNaN(dS.getTime()) && !isNaN(dE.getTime())) {
@@ -418,27 +315,30 @@ export class BookingService {
       }
     }
 
-    if (!nanny?.hourlyRate || nanny.hourlyRate <= 0)
-      throw new AppError(
-        "This nanny does not have a valid hourly rate configured.",
-        400,
-      );
+    console.log("tag 4", body.lunch);
+    // ── 7. Calculate pricing ─────────────────────────────────────────────────
+    const pricing = nanny
+      ? calcPricing({
+          serviceType: body.serviceType,
+          hourlyRate: nanny.hourlyRate,
+          dailyRate:
+            nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null,
+          shiftStart,
+          shiftEnd,
+          workingDays: billingWorkingDays,
+          couponCode: body.couponCode ?? undefined,
+          goalsFee,
+          lunch: body.lunch === true,
+        })
+      : null;
 
-    const pricing = calcPricingV2({
-      serviceType: body.serviceType,
-      hourlyRate: nanny.hourlyRate,
-      dailyRate:
-        nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null,
-      startTime: shiftStart,
-      endTime: shiftEnd,
-      workingDays: billingWorkingDays,
-      couponCode: body.couponCode ?? undefined,
-      goalsFee,
-    });
+    console.log("you pricies", calcPricing);
 
+    // ── 8. Build address snapshot ────────────────────────────────────────────
     const addr = body.address;
     const coords = addr?.coordinates?.coordinates;
 
+    // ── 9. Build requested tasks ─────────────────────────────────────────────
     const requestedTasks = Array.isArray(body.requestedTasks)
       ? body.requestedTasks.map((t: string) => ({
           task: t,
@@ -447,6 +347,7 @@ export class BookingService {
         }))
       : [];
 
+    // ── 10. Create booking ───────────────────────────────────────────────────
     const booking = await prisma.booking.create({
       data: {
         userId,
@@ -457,6 +358,7 @@ export class BookingService {
         specialInstructions: body.specialInstructions ?? null,
         childrenId: body.childrenId,
         requestedTasks,
+        workingDays: workingDayNames,
         addressLabel: addr?.label ?? null,
         addressLine1: addr?.addressLine1 ?? "",
         addressLine2: addr?.addressLine2 ?? null,
@@ -466,25 +368,28 @@ export class BookingService {
         addressCountry: addr?.country ?? "IN",
         addressLat: coords ? coords[1] : null,
         addressLng: coords ? coords[0] : null,
-        baseAmount: pricing.baseFee,
-        gstAmount: pricing.gst,
-        totalAmount: pricing.total,
-        // PENDING_NANNY_CONFIRMATION = awaiting nanny confirmation (no payment yet)
+        baseAmount: pricing?.baseFee ?? 0,
+        gstAmount: pricing?.gst ?? 0,
+        totalAmount: pricing?.total ?? 0,
         status: BookingStatus.PENDING_NANNY_CONFIRMATION,
-        pricingDetails: {
-          sessionHours: pricing.sessionHours,
-          workingDays: pricing.workingDays,
-          description: pricing.description,
-          baseFee: pricing.baseFee,
-          emergencySurcharge: pricing.emergencySurcharge,
-          couponCode: pricing.couponCode,
-          discount: pricing.discount,
-          discountedBase: pricing.discountedBase,
-          platformFee: pricing.platformFee,
-          gst: pricing.gst,
-          goalsFee: pricing.goalsFee,
-          total: pricing.total,
-        },
+        pricingDetails: pricing
+          ? {
+              sessionHours: pricing.sessionHours,
+              workingDays: pricing.workingDays,
+              description: pricing.description,
+              baseFee: pricing.baseFee,
+              emergencySurcharge: pricing.emergencySurcharge,
+              couponCode: pricing.couponCode,
+              couponLabel: pricing.couponLabel,
+              discount: pricing.discount,
+              discountedBase: pricing.discountedBase,
+              platformFee: pricing.platformFee,
+              gst: pricing.gst,
+              goalsFee: pricing.goalsFee,
+              lunchFee: pricing.lunchFee,
+              total: pricing.total,
+            }
+          : null,
         timeline: appendTimeline(
           [],
           BookingStatus.PENDING_NANNY_CONFIRMATION,
@@ -494,48 +399,18 @@ export class BookingService {
       include: { children: true },
     });
 
-    // Day-wise plan creation
+    // ── 11. Create day-wise plans ────────────────────────────────────────────
     const taskStrings: string[] = Array.isArray(body.requestedTasks)
       ? body.requestedTasks
       : [];
-    const planDates: Date[] = [];
-
-    if (
-      isRangeType &&
-      Array.isArray(body.workingDays) &&
-      body.workingDays.length > 0
-    ) {
-      const DAY_MAP: Record<string, number> = {
-        MON: 1,
-        TUE: 2,
-        WED: 3,
-        THU: 4,
-        FRI: 5,
-        SAT: 6,
-        SUN: 0,
-      };
-      const activeDayNums = new Set(
-        body.workingDays.map(
-          (d: string) => DAY_MAP[d.toUpperCase().trim()] ?? -1,
-        ),
-      );
-      const startStr = start.toISOString().split("T")[0];
-      const endStr = end.toISOString().split("T")[0];
-      const cur = new Date(`${startStr}T12:00:00.000Z`);
-      const ceil = new Date(`${endStr}T23:59:59.999Z`);
-      while (cur <= ceil) {
-        if (activeDayNums.has(cur.getUTCDay())) {
-          const d = new Date(cur);
-          d.setUTCHours(0, 0, 0, 0);
-          planDates.push(d);
-        }
-        cur.setUTCDate(cur.getUTCDate() + 1);
-      }
-    } else {
-      const d = new Date(start);
-      d.setUTCHours(0, 0, 0, 0);
-      planDates.push(d);
-    }
+    const planDates =
+      isRange && workingDayNames.length > 0
+        ? getWorkingDates(start, end, workingDayNames)
+        : (() => {
+            const d = new Date(start);
+            d.setUTCHours(0, 0, 0, 0);
+            return [d];
+          })();
 
     if (planDates.length > 0) {
       await Promise.all(
@@ -555,6 +430,7 @@ export class BookingService {
       );
     }
 
+    // ── 12. Create child goals ───────────────────────────────────────────────
     if (selectedGoals.length > 0) {
       await Promise.all(
         selectedGoals.map((g: any) =>
@@ -574,23 +450,17 @@ export class BookingService {
       );
     }
 
-    // Emit immediately — events.ts handler sends FCM to nanny right now.
-    // Nanny must confirm BEFORE user pays.
+    // Nanny gets an FCM push to accept or reject
     bus.emit(Events.BOOKING_CREATED, { bookingId: booking.id, userId });
     log.info(
-      `[createBooking] id=${booking.id} total=₹${pricing.total} — nanny FCM triggered`,
+      `[createBooking] id=${booking.id} total=₹${pricing?.total ?? 0} — nanny FCM triggered`,
     );
     return { ...booking, pricing };
   }
 
   // ── PATCH /api/v1/bookings/:id/confirm ───────────────────────────────────
-  // Nanny taps Accept on the BookingRequestOverlay or notification action.
-  //
-  // PENDING_PAYMENT → CONFIRMED
-  // (CONFIRMED = nanny said yes, now waiting for the user to pay)
-  //
-  // After this, events.ts sends "Nanny confirmed" FCM to the user.
-  // The user's app receives it and navigates to the payment screen.
+  // Nanny accepts the booking request.
+  // PENDING_NANNY_CONFIRMATION → PENDING_PAYMENT
   async confirmBooking(bookingId: string, nannyUserId: string) {
     const nanny = await prisma.nanny.findUnique({
       where: { userId: nannyUserId },
@@ -605,17 +475,17 @@ export class BookingService {
     if (booking.nannyId !== nanny.id)
       throw new AppError("This booking is not assigned to you", 403);
 
-    // Idempotent: already confirmed (awaiting payment), return early without re-emitting
+    // Idempotent: already awaiting payment
     if (booking.status === BookingStatus.PENDING_PAYMENT) {
       log.info(
-        `[confirmBooking] Already PENDING_PAYMENT, returning early. bookingId=${bookingId}`,
+        `[confirmBooking] Already PENDING_PAYMENT bookingId=${bookingId}`,
       );
       return booking;
     }
 
     if (booking.status !== BookingStatus.PENDING_NANNY_CONFIRMATION)
       throw new AppError(
-        `Cannot confirm booking in status: ${booking.status}. Booking must be PENDING_NANNY_CONFIRMATION.`,
+        `Cannot confirm booking in status: ${booking.status}. Must be PENDING_NANNY_CONFIRMATION.`,
         400,
       );
 
@@ -631,24 +501,20 @@ export class BookingService {
       },
     });
 
-    // events.ts listener will send "Nanny confirmed, please pay" FCM to user
     bus.emit(Events.BOOKING_CONFIRMED, {
       bookingId,
       userId: booking.userId,
       nannyId: nanny.id,
     });
-
     log.info(
-      `[confirmBooking] bookingId=${bookingId} nannyId=${nanny.id} → CONFIRMED`,
+      `[confirmBooking] bookingId=${bookingId} nannyId=${nanny.id} → PENDING_PAYMENT`,
     );
     return updated;
   }
 
   // ── PATCH /api/v1/bookings/:id/reject ────────────────────────────────────
-  // Nanny taps Reject on the BookingRequestOverlay or notification action.
-  //
-  // PENDING_PAYMENT → CANCELLED_BY_NANNY
-  // nannyId cleared so admin can reassign.
+  // Nanny rejects the booking request. nannyId cleared for possible reassignment.
+  // PENDING_NANNY_CONFIRMATION → CANCELLED_BY_NANNY
   async rejectBooking(bookingId: string, nannyUserId: string, reason?: string) {
     const nanny = await prisma.nanny.findUnique({
       where: { userId: nannyUserId },
@@ -665,7 +531,7 @@ export class BookingService {
 
     if (booking.status !== BookingStatus.PENDING_NANNY_CONFIRMATION)
       throw new AppError(
-        `Cannot reject booking in status: ${booking.status}. Booking must be PENDING_NANNY_CONFIRMATION.`,
+        `Cannot reject booking in status: ${booking.status}. Must be PENDING_NANNY_CONFIRMATION.`,
         400,
       );
 
@@ -686,7 +552,7 @@ export class BookingService {
       },
     });
 
-    // events.ts listener sends "nanny unavailable" FCM to user
+    // No reservedSlot removal needed — slot was never added at this stage
     bus.emit(Events.BOOKING_CANCELLED, {
       bookingId,
       userId: booking.userId,
@@ -694,23 +560,17 @@ export class BookingService {
       status: BookingStatus.CANCELLED_BY_NANNY,
     });
 
-    log.info(
-      `[rejectBooking] bookingId=${bookingId} nannyId=${nanny.id} reason="${cancellationReason}"`,
-    );
+    log.info(`[rejectBooking] bookingId=${bookingId} nannyId=${nanny.id}`);
     return updated;
   }
 
   // ── Payment events ────────────────────────────────────────────────────────
-  // handlePaymentCaptured: called by your payment webhook.
-  //
-  // CONFIRMED → NANNY_ASSIGNED
-  // (CONFIRMED = nanny accepted, NANNY_ASSIGNED = money received, ready to start)
+  // Called by the payment webhook via eventHandlers.ts after Razorpay confirms.
+  // PENDING_PAYMENT → CONFIRMED
   async handlePaymentCaptured(bookingId: string, paymentId?: string) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
-
-    // Only process if booking is PENDING_PAYMENT (nanny accepted, payment was pending)
     if (!booking || booking.status !== BookingStatus.PENDING_PAYMENT) return;
 
     await prisma.booking.update({
@@ -726,15 +586,25 @@ export class BookingService {
       },
     });
 
-    // Seed attendance rows now that both nanny and payment are confirmed
+    // Block this time slot on the nanny's profile so the explore route hides her
+    if (booking.nannyId) {
+      await addReservedSlot(
+        booking.nannyId,
+        bookingId,
+        booking.scheduledStartTime,
+        booking.scheduledEndTime,
+      );
+    }
+
+    // Pre-seed attendance rows for every working day
     try {
       const { seeded } = await seedAttendanceRecords(bookingId);
       log.info(
-        `[handlePaymentCaptured] bookingId=${bookingId} attendanceRowsSeeded=${seeded}`,
+        `[handlePaymentCaptured] bookingId=${bookingId} attendanceSeeded=${seeded}`,
       );
     } catch (e) {
       log.error(
-        `[handlePaymentCaptured] attendance seed failed for bookingId=${bookingId}`,
+        `[handlePaymentCaptured] attendance seed failed bookingId=${bookingId}`,
         e,
       );
     }
@@ -746,8 +616,6 @@ export class BookingService {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
-
-    // Only cancel if still waiting for payment (nanny confirmed but user hasn't paid)
     if (!booking || booking.status !== BookingStatus.PENDING_PAYMENT) return;
 
     await prisma.booking.update({
@@ -767,8 +635,7 @@ export class BookingService {
   }
 
   // ── PATCH /api/v1/bookings/:id/accept ────────────────────────────────────
-  // Legacy in-app accept (kept for compatibility).
-  // The notification-driven flow uses confirmBooking() above instead.
+  // Legacy in-app accept (kept for backward compatibility).
   async acceptBooking(bookingId: string, userId: string) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
@@ -781,7 +648,7 @@ export class BookingService {
       throw new AppError("This booking is not assigned to you", 403);
     if (booking.status !== BookingStatus.PENDING_PAYMENT)
       throw new AppError(
-        `Cannot accept booking in status: ${booking.status}. Booking must be PENDING_PAYMENT.`,
+        `Cannot accept booking in status: ${booking.status}. Must be PENDING_PAYMENT.`,
         400,
       );
 
@@ -799,8 +666,9 @@ export class BookingService {
   }
 
   // ── PATCH /api/v1/bookings/:id/start ─────────────────────────────────────
-  // Nanny clocks in. Booking must be NANNY_ASSIGNED (payment done).
-  // Range types also allow re-clock-in from IN_PROGRESS on subsequent days.
+  // Nanny clocks in.
+  // Single-day: CONFIRMED → IN_PROGRESS
+  // Range:      CONFIRMED | IN_PROGRESS → IN_PROGRESS (daily clock-in, multi-day)
   async startBooking(bookingId: string, userId: string) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
@@ -812,7 +680,7 @@ export class BookingService {
     if (booking.nannyId !== nanny.id)
       throw new AppError("This booking is not assigned to you", 403);
 
-    const isRange = RANGE_TYPES.includes(booking.serviceType as any);
+    const isRange = isRangeType(booking.serviceType);
 
     if (isRange) {
       const allowed =
@@ -826,7 +694,7 @@ export class BookingService {
     } else {
       if (booking.status !== BookingStatus.CONFIRMED)
         throw new AppError(
-          `Cannot start booking in status: ${booking.status}. Booking must be CONFIRMED.`,
+          `Cannot start booking in status: ${booking.status}. Must be CONFIRMED.`,
           400,
         );
     }
@@ -835,8 +703,9 @@ export class BookingService {
     const today = new Date(now);
     today.setUTCHours(0, 0, 0, 0);
 
+    // Determine lateness against today's scheduled start time
     const scheduledStart = new Date(booking.scheduledStartTime);
-    const todayScheduled = new Date(
+    const todayScheduledUTC = new Date(
       Date.UTC(
         today.getUTCFullYear(),
         today.getUTCMonth(),
@@ -849,13 +718,14 @@ export class BookingService {
     );
     const lateMinutes = Math.max(
       0,
-      Math.floor((now.getTime() - todayScheduled.getTime()) / 60000),
+      Math.floor((now.getTime() - todayScheduledUTC.getTime()) / 60_000),
     );
     const attendanceStatus =
       lateMinutes > LATE_THRESHOLD_MINUTES
         ? AttendanceStatus.LATE
         : AttendanceStatus.PRESENT;
 
+    // Upsert today's attendance row
     const existing = await getTodayAttendance(bookingId, nanny.id);
     if (existing) {
       if (existing.clockInAt)
@@ -905,7 +775,7 @@ export class BookingService {
 
     log.info(
       `[startBooking] bookingId=${bookingId} serviceType=${booking.serviceType}` +
-        ` lateMinutes=${lateMinutes} attendanceStatus=${attendanceStatus}`,
+        ` lateMinutes=${lateMinutes} attendance=${attendanceStatus}`,
     );
     return {
       booking: updated,
@@ -914,6 +784,9 @@ export class BookingService {
   }
 
   // ── PATCH /api/v1/bookings/:id/complete ──────────────────────────────────
+  // Nanny clocks out.
+  // Single-day / final day of range  → COMPLETED  (removes reservedSlot)
+  // Non-final day of range           → stays IN_PROGRESS (daily clock-out only)
   async completeBooking(bookingId: string, userId: string) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
@@ -926,22 +799,21 @@ export class BookingService {
       throw new AppError("This booking is not assigned to you", 403);
     if (booking.status !== BookingStatus.IN_PROGRESS)
       throw new AppError(
-        `Cannot complete booking in status: ${booking.status}. Booking must be IN_PROGRESS.`,
+        `Cannot complete booking in status: ${booking.status}. Must be IN_PROGRESS.`,
         400,
       );
 
     const now = new Date();
-    const isRange = RANGE_TYPES.includes(booking.serviceType as any);
-
+    const isRange = isRangeType(booking.serviceType);
     const attendance = await getTodayAttendance(bookingId, nanny.id);
+
     if (!attendance?.clockInAt)
       throw new AppError("You must clock in before you can clock out.", 400);
     if (attendance.clockOutAt)
       throw new AppError("You have already clocked out for today.", 400);
 
-    const workedMs = now.getTime() - attendance.clockInAt.getTime();
-    const workedHrs = workedMs / 3_600_000;
-
+    const workedHrs =
+      (now.getTime() - attendance.clockInAt.getTime()) / 3_600_000;
     const expectedHrs = calcSessionHours(
       new Date(booking.scheduledStartTime),
       new Date(booking.scheduledEndTime),
@@ -956,11 +828,11 @@ export class BookingService {
       data: { clockOutAt: now, status: finalAttStatus },
     });
 
+    // Check if this is the final working day of the engagement
     const today = new Date(now);
     today.setUTCHours(0, 0, 0, 0);
     const engagementEnd = new Date(booking.scheduledEndTime);
     engagementEnd.setUTCHours(0, 0, 0, 0);
-
     const isFinalDay = !isRange || today.getTime() >= engagementEnd.getTime();
 
     let updatedBooking;
@@ -987,6 +859,9 @@ export class BookingService {
         }),
       ]);
 
+      // Free up the nanny's time slot
+      if (booking.nannyId) await removeReservedSlot(booking.nannyId, bookingId);
+
       bus.emit(Events.BOOKING_COMPLETED, {
         bookingId,
         nannyId: nanny.id,
@@ -997,6 +872,7 @@ export class BookingService {
         `[completeBooking] FINAL bookingId=${bookingId} workedHrs=${workedHrs.toFixed(1)}`,
       );
     } else {
+      // Daily clock-out for multi-day bookings — booking stays IN_PROGRESS
       updatedBooking = await prisma.booking.update({
         where: { id: bookingId },
         data: {
@@ -1071,6 +947,15 @@ export class BookingService {
       },
     });
 
+    // Free the nanny's slot if payment had already been taken
+    if (
+      booking.nannyId &&
+      (booking.status === BookingStatus.CONFIRMED ||
+        booking.status === BookingStatus.IN_PROGRESS)
+    ) {
+      await removeReservedSlot(booking.nannyId, bookingId);
+    }
+
     bus.emit(Events.BOOKING_CANCELLED, { bookingId, userId, reason, status });
     return updated;
   }
@@ -1123,6 +1008,7 @@ export class BookingService {
         data: { rating: newRating, totalReviews: newTotal },
       });
     }
+
     return updated;
   }
 
@@ -1306,6 +1192,7 @@ export class BookingService {
       return paginatedResult(bookings, total, page, limit);
     }
 
+    // Pin IN_PROGRESS bookings to the top, paginate the rest
     const [inProgress, others, total] = await Promise.all([
       prisma.booking.findMany({
         where: { ...baseWhere, status: BookingStatus.IN_PROGRESS },
@@ -1328,49 +1215,61 @@ export class BookingService {
 
   // ── GET /api/v1/bookings/:id ─────────────────────────────────────────────
   async getBookingById(bookingId: string, userId: string, role: string) {
-    // IST window: todayISTStartUTC = today 00:00 IST in UTC
-    const IST_OFFSET_MS    = 5.5 * 60 * 60 * 1000;
-    const utcToday         = new Date();
+    // IST window: "today" in IST = UTC−5h30m offset window
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const utcToday = new Date();
     utcToday.setUTCHours(0, 0, 0, 0);
     const todayISTStartUTC = new Date(utcToday.getTime() - IST_OFFSET_MS);
-    const todayISTEndUTC   = new Date(todayISTStartUTC.getTime() + 24 * 60 * 60 * 1000);
- 
-    // Fetch booking — dailyPlan without tasks (we filter tasks separately below)
+    const todayISTEndUTC = new Date(
+      todayISTStartUTC.getTime() + 24 * 60 * 60 * 1000,
+    );
+
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
       include: {
-        user:  { select: { id: true, name: true, mobile: true, profilePhoto: true } },
-        nanny: { select: { id: true, name: true, mobile: true, profilePhoto: true, rating: true } },
-        childGoals:                true,
-        dailyPlan:                 true,
+        user: {
+          select: { id: true, name: true, mobile: true, profilePhoto: true },
+        },
+        nanny: {
+          select: {
+            id: true,
+            name: true,
+            mobile: true,
+            profilePhoto: true,
+            rating: true,
+          },
+        },
+        childGoals: true,
+        dailyPlan: true,
         requestedDayWiseDailyPlan: { include: { requestedDailyPlan: true } },
-        attendanceRecords:         { orderBy: { scheduledDate: "asc" } },
+        attendanceRecords: { orderBy: { scheduledDate: "asc" } },
       },
     });
     if (!booking) throw new AppError("Booking not found", 404);
- 
+
     const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(role);
     const isOwner = booking.userId === userId;
-    let   isNanny = false;
- 
+    let isNanny = false;
+
     if (!isOwner && !isAdmin) {
       const nanny = await prisma.nanny.findUnique({ where: { userId } });
       isNanny = !!nanny && booking.nannyId === nanny.id;
-      if (!isNanny) throw new AppError("You do not have access to this booking", 403);
+      if (!isNanny)
+        throw new AppError("You do not have access to this booking", 403);
     }
- 
-    // Fetch today's tasks with IST window and stitch onto dailyPlan[0].tasks
+
+    // Stitch today's AI-generated tasks (IST-aware) onto the daily plan
     const plan = booking.dailyPlan?.[0] ?? null;
     const todayTasks = plan
       ? await prisma.planTask.findMany({
           where: {
-            planId:  plan.id,
+            planId: plan.id,
             forDate: { gte: todayISTStartUTC, lt: todayISTEndUTC },
           },
           orderBy: { scheduledTime: "asc" },
         })
       : [];
- 
+
     return {
       ...booking,
       dailyPlan: booking.dailyPlan.map((p) =>
@@ -1378,7 +1277,6 @@ export class BookingService {
       ),
     };
   }
- 
 
   // ── GET /api/v1/bookings/:id/attendance ──────────────────────────────────
   async getBookingAttendance(
@@ -1461,6 +1359,7 @@ export class BookingService {
       }),
       prisma.booking.count({ where }),
     ]);
+
     return paginatedResult(bookings, total, page, limit);
   }
 
@@ -1490,16 +1389,26 @@ export class BookingService {
       },
     });
 
+    // Free the nanny's slot if payment had already been taken
+    if (
+      booking.nannyId &&
+      (booking.status === BookingStatus.CONFIRMED ||
+        booking.status === BookingStatus.IN_PROGRESS)
+    ) {
+      await removeReservedSlot(booking.nannyId, bookingId);
+    }
+
     bus.emit(Events.BOOKING_CANCELLED, {
       bookingId,
       userId: booking.userId,
       reason,
       status: BookingStatus.CANCELLED_BY_ADMIN,
     });
+
     return updated;
   }
 
-  // ── GET /api/v1/bookings/active-shift ────────────────────────────────────
+  // ── GET /api/v1/bookings/me/active-shift ────────────────────────────────
   async getActiveShift(
     userId: string,
   ): Promise<{ bookingId: string; booking: any } | null> {
@@ -1532,13 +1441,11 @@ export class BookingService {
       },
     });
 
-    if (!todayAttendance?.clockInAt) return null;
-    if (todayAttendance.clockOutAt) return null;
-
-    // console.log("getActiveShift booking:", booking);
+    if (!todayAttendance?.clockInAt || todayAttendance.clockOutAt) return null;
     return { bookingId: booking.id, booking };
   }
 
+  // ── GET /api/v1/bookings/me/live-status ──────────────────────────────────
   async getUserLiveStatus(userId: string): Promise<{
     bookingId: string;
     nannyName: string;
@@ -1558,7 +1465,6 @@ export class BookingService {
       completionPct: number | null;
     }[];
   } | null> {
-    // ── Step 1: Find an active booking for this user ───────────────────────
     const booking = await prisma.booking.findFirst({
       where: {
         userId,
@@ -1578,8 +1484,7 @@ export class BookingService {
 
     if (!booking || !booking.nanny) return null;
 
-    // ── Step 2: Check nanny is clocked in and NOT yet clocked out today ────
-    // Attendance rows use scheduledDate = UTC midnight, so this query is fine.
+    // Check nanny is clocked in and not yet clocked out today
     const utcToday = new Date();
     utcToday.setUTCHours(0, 0, 0, 0);
     const utcTomorrow = new Date(utcToday);
@@ -1593,49 +1498,31 @@ export class BookingService {
       },
     });
 
-    // Not clocked in yet, or already clocked out → no live status
-    if (!attendance?.clockInAt) return null;
-    if (attendance?.clockOutAt) return null;
+    if (!attendance?.clockInAt || attendance.clockOutAt) return null;
 
-    // ── Step 3: IST-aware date window for today's tasks ───────────────────
-    //
-    // IST = UTC + 5h 30m
-    // "Today in IST" starts at  [utcToday - 5h30m]  i.e. yesterday 18:30 UTC
-    // "Today in IST" ends at    [utcToday + 18h30m] i.e. today     18:30 UTC
-    //
-    // Example for 30 Apr IST:
-    //   todayISTStartUTC = 2026-04-29T18:30:00.000Z  (= 30 Apr 00:00 IST)
-    //   todayISTEndUTC   = 2026-04-30T18:30:00.000Z  (= 01 May 00:00 IST)
-    //
-    // Tasks stored for "30 Apr IST" have forDate = 2026-04-29T18:30:00.000Z
-    // which falls inside [todayISTStartUTC, todayISTEndUTC) → correctly included.
-    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 19800000 ms
+    // IST-aware window for today's tasks
+    // IST = UTC+5h30m → "today in IST" starts at [UTC midnight − 5h30m]
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
     const todayISTStartUTC = new Date(utcToday.getTime() - IST_OFFSET_MS);
     const todayISTEndUTC = new Date(
       todayISTStartUTC.getTime() + 24 * 60 * 60 * 1000,
     );
 
-    // ── Step 4: Fetch the AI daily plan for this booking ──────────────────
     const dailyPlan = await prisma.dailyPlan.findUnique({
       where: { bookingId: booking.id },
     });
 
-    // ── Step 5: Fetch today's tasks using IST window ───────────────────────
     const tasks = dailyPlan
       ? await prisma.planTask.findMany({
           where: {
             planId: dailyPlan.id,
-            forDate: {
-              gte: todayISTStartUTC, // 29 Apr 18:30 UTC = 30 Apr 00:00 IST
-              lt: todayISTEndUTC, // 30 Apr 18:30 UTC = 01 May 00:00 IST
-            },
+            forDate: { gte: todayISTStartUTC, lt: todayISTEndUTC },
           },
           include: { log: true },
           orderBy: { scheduledTime: "asc" },
         })
       : [];
 
-    // ── Step 6: Map to response shape ─────────────────────────────────────
     const mapped = tasks.map((t) => ({
       id: t.id,
       title: t.title,
@@ -1648,8 +1535,7 @@ export class BookingService {
 
     log.info(
       `[getUserLiveStatus] userId=${userId} bookingId=${booking.id}` +
-        ` tasks=${mapped.length} clocked_in=${attendance.clockInAt.toISOString()}` +
-        ` IST_window=[${todayISTStartUTC.toISOString()}, ${todayISTEndUTC.toISOString()})`,
+        ` tasks=${mapped.length} clockedIn=${attendance.clockInAt.toISOString()}`,
     );
 
     return {

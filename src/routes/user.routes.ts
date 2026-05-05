@@ -113,9 +113,10 @@ router.post('/me/updateEmail', validate(S.deviceToken), async (req: Request, res
 });
 
 router.get('/me/payments', async (req: Request, res: Response, next: NextFunction) => {
-
      try { res.json(ok(await service.getMyPayments(req.user!.userId))); } catch (e) { next(e); }
-
+});
+router.post('/me/reportBug', async (req: Request, res: Response, next: NextFunction) => {
+     try { res.json(ok(await service.reportBug(req.user!.userId, req.body))); } catch (e) { next(e); }
 });
 
 
