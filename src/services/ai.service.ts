@@ -47,14 +47,15 @@ export interface AiDailyPlan {
 }
 
 export interface GenerateDailyTasksInput {
-  // parentGoalPrompt:    string;
-  childAgeMonths:      number;
-  childGender:         string;
-  overallStrategy:     string;
-  weeklyFocusAreas:    { week: number; focus: string }[];
-  currentWeek:         number;  // which week of the booking we're in (1-based)
-  goals:               GoalContext[];
-  previousTaskSummary: string;  // brief summary of yesterday's completions
+  parentGoalPrompt:       string;   
+  childAgeMonths:         number;
+  childGender:            string;
+  overallStrategy:        string;
+  weeklyFocusAreas:       { week: number; focus: string }[];
+  currentWeek:            number;
+  goals:                  GoalContext[];
+  previousTaskSummary:    string;
+  parentRequestedRoutine: { time: string; task: string }[];
 }
 
 export interface AiTask {
