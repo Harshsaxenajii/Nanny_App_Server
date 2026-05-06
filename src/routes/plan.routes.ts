@@ -1,47 +1,40 @@
 /**
  * plan.routes.ts
  *
- * POST /api/v1/plan/generate/:bookingId   — trigger full AI plan generation
- *                                           (called once after booking confirmed)
- * POST /api/v1/plan/tasks/:bookingId      — manually trigger today's task generation
- *                                           (normally done by cron — useful for testing)
- * GET  /api/v1/plan/:bookingId            — get the master DailyPlan for a booking
+ * POST /api/v1/plan/generate/:bookingId   — manually trigger generatePlan (testing)
+ * POST /api/v1/plan/tasks/:bookingId      — manually trigger generateDailyTasks (testing)
+ * GET  /api/v1/plan/:bookingId            — get DailyPlan + today's tasks
+ * POST /api/v1/plan/cron/midnight         — manually trigger midnight job (testing)
+ * POST /api/v1/plan/cron/morning          — manually trigger 5am job (testing)
  */
 
-import { Router, Request, Response, NextFunction } from 'express';
-import { PlanService }                             from '../services/plan.service'
-import { runDailyPlanJob }                         from '../jobs/dailyPlan.job';
-import { auth, roles }                             from '../middlewares/index';
-import { ok }                                      from '../utils/response';
+import { Router, Request, Response, NextFunction } from "express";
+import { PlanService }                             from "../services/plan.service";
+import { runMidnightPlanJob, runMorningTaskJob }   from "../jobs/dailyPlan.job";
+import { auth, roles }                             from "../middlewares/index";
+import { ok }                                      from "../utils/response";
 
 const router      = Router();
 const planService = new PlanService();
 
-// router.use(auth);
+router.use(auth);
 
-// ── Generate master plan (once per booking) ───────────────────────────────────
-// Called right after booking is confirmed and goals are set.
-// In production this would be triggered by an event (booking.confirmed),
-// but we expose it as an endpoint so it can be tested directly.
-
+// ── Generate master plan for a booking (once only) ────────────────────────
 router.post(
-  '/generate/:bookingId',
-  // roles('ADMIN', 'SUPER_ADMIN'),
+  "/generate/:bookingId",
+  roles("ADMIN", "SUPER_ADMIN"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const plan = await planService.generatePlan(req.params.bookingId);
-      res.json(ok(plan, 'AI plan generated successfully'));
+      res.json(ok(plan, "Master AI plan generated"));
     } catch (e) { next(e); }
   },
 );
 
-// ── Manually trigger today's task generation ──────────────────────────────────
-// Normally done by the cron at 05:00 AM IST.
-// Exposed here so you can test without waiting for the cron.
-
+// ── Generate today's tasks for a booking ─────────────────────────────────
 router.post(
-  '/tasks/:bookingId',
-  // roles('ADMIN', 'SUPER_ADMIN'),
+  "/tasks/:bookingId",
+  roles("ADMIN", "SUPER_ADMIN"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const tasks = await planService.generateDailyTasks(req.params.bookingId);
@@ -50,30 +43,43 @@ router.post(
   },
 );
 
-// ── Get master DailyPlan for a booking ───────────────────────────────────────
-
+// ── Get DailyPlan + today's tasks ─────────────────────────────────────────
 router.get(
-  '/:bookingId',
+  "/:bookingId",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { bookingId } = req.params;
-
-      // Basic ownership check — admins see all, users/nannies see their own
-      const plan = await planService['getDailyPlan'](bookingId, req.user!.userId, req.user!.role);
+      const plan = await planService.getDailyPlan(
+        req.params.bookingId,
+        req.user!.userId,
+        req.user!.role,
+      );
       res.json(ok(plan));
     } catch (e) { next(e); }
   },
 );
 
-// ── Trigger the full cron job manually (admin/testing only) ──────────────────
-
+// ── Manually trigger midnight cron (testing only) ─────────────────────────
+// Simulates 12:00 AM — generates master plans for bookings starting today
 router.post(
-  '/cron/run',
-  roles('ADMIN', 'SUPER_ADMIN'),
+  "/cron/midnight",
+  roles("ADMIN", "SUPER_ADMIN"),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      await runDailyPlanJob();
-      res.json(ok(null, 'Daily plan cron job executed'));
+      await runMidnightPlanJob();
+      res.json(ok(null, "Midnight plan job executed"));
+    } catch (e) { next(e); }
+  },
+);
+
+// ── Manually trigger 5am cron (testing only) ──────────────────────────────
+// Simulates 5:00 AM — generates daily tasks for all active bookings
+router.post(
+  "/cron/morning",
+  roles("ADMIN", "SUPER_ADMIN"),
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      await runMorningTaskJob();
+      res.json(ok(null, "Morning task job executed"));
     } catch (e) { next(e); }
   },
 );

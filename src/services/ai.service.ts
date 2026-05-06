@@ -6,19 +6,17 @@
  * No DB access — that is plan.service.ts's job.
  *
  * Exposed methods:
- *   generatePlan(input)       — called once when booking is confirmed
- *                               returns DailyPlan strategy + weekly focus areas
+ *   generatePlan(input)       — called at 12 AM on booking start day
  *   generateDailyTasks(input) — called every morning by the cron job
- *                               returns today's PlanTask[]
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { createLogger }       from '../utils/logger';
-import { AppError }           from '../utils/AppError';
+import { createLogger }        from '../utils/logger';
+import { AppError }            from '../utils/AppError';
 
 const log = createLogger('ai');
 
-// ─── Re-exported types (plan.service + cron consume these) ───────────────────
+// ─── Types (consumed by plan.service.ts) ─────────────────────────────────────
 
 export interface GoalContext {
   id:                string;
@@ -33,8 +31,8 @@ export interface GoalContext {
 export interface GeneratePlanInput {
   parentGoalPrompt: string;
   childAgeMonths:   number;
-  childGender:      string;   // 'BOY' | 'GIRL' | 'OTHER'
-  bookingDays:      number;   // e.g. 35
+  childGender:      string;
+  bookingDays:      number;
   goals:            GoalContext[];
 }
 
@@ -43,11 +41,11 @@ export interface AiDailyPlan {
   weeklyFocusAreas:    { week: number; focus: string }[];
   difficultyLevel:     'LOW' | 'MEDIUM' | 'HIGH';
   totalPlannedMinutes: number;
-  restWindows:         string[];  // e.g. ["12:30 PM - 1:30 PM"]
+  restWindows:         string[];
 }
 
 export interface GenerateDailyTasksInput {
-  parentGoalPrompt:       string;   
+  parentGoalPrompt:       string;                           // FIX: restored — critical context
   childAgeMonths:         number;
   childGender:            string;
   overallStrategy:        string;
@@ -55,15 +53,15 @@ export interface GenerateDailyTasksInput {
   currentWeek:            number;
   goals:                  GoalContext[];
   previousTaskSummary:    string;
-  parentRequestedRoutine: { time: string; task: string }[];
+  parentRequestedRoutine: { time: string; task: string }[]; // FIX: added — parent's routine
 }
 
 export interface AiTask {
-  goalId:            string;   // real ChildGoal.id — resolved inside this service
+  goalId:            string;
   title:             string;
   category:          'COGNITIVE' | 'PHYSICAL' | 'SOCIAL' | 'EMOTIONAL' | 'CREATIVE' | 'ROUTINE';
   durationMinutes:   number;
-  scheduledTime:     string;  // "HH:MM AM/PM"
+  scheduledTime:     string;
   difficulty:        'LOW' | 'MEDIUM' | 'HIGH';
   description:       string;
   materials:         string[];
@@ -74,10 +72,8 @@ export interface AiTask {
   ifTooHard:         string;
 }
 
-// ─── Internal Gemini response shapes (before goalIndex is resolved) ───────────
-
 interface RawAiTask extends Omit<AiTask, 'goalId'> {
-  goalIndex: number;  // Gemini returns 0-based index, we resolve to real ID here
+  goalIndex: number;
 }
 
 interface RawPlanResponse  { dailyPlan: AiDailyPlan; }
@@ -96,11 +92,12 @@ export class AiService {
   }
 
   // ── generatePlan ────────────────────────────────────────────────────────────
-  // Called once when booking is confirmed.
-  // Returns the master strategy stored in DailyPlan for the whole booking.
+  // Called once at 12 AM on the day the booking starts.
 
   async generatePlan(input: GeneratePlanInput): Promise<AiDailyPlan> {
-    log.info('Generating master plan (child age: %d months)', input.childAgeMonths);
+    log.info('Generating master plan (child age: %d months, %d days)', input.childAgeMonths, input.bookingDays);
+
+    const weeksCount = Math.ceil(input.bookingDays / 7);
 
     const prompt = `
 You are an expert early childhood development planner for a professional nanny care platform in India.
@@ -118,29 +115,28 @@ Schema:
   }
 }
 
-Parent's goal prompt: "${input.parentGoalPrompt}"
+Parent's goal for their child:
+"${input.parentGoalPrompt}"
 
 Child info:
 - Age: ${input.childAgeMonths} months
 - Gender: ${input.childGender}
-- Booking duration: ${input.bookingDays} days
+- Booking duration: ${input.bookingDays} days (${weeksCount} weeks)
 
-Goals:
+Structured goals selected by parent:
 ${this.formatGoals(input.goals)}
 
-The weeklyFocusAreas array must have exactly ${Math.ceil(input.bookingDays / 7)} entries.
+Rules:
+- weeklyFocusAreas must have exactly ${weeksCount} entries (one per week).
+- restWindows should be time ranges like "12:30 PM - 1:30 PM".
+- overallStrategy should be 2-3 sentences describing the core approach.
+- totalPlannedMinutes is the total structured activity per day (120-180 recommended).
+
 Return only valid JSON.
     `.trim();
 
-    const raw = await this.callGemini(prompt);
-
-    let parsed: RawPlanResponse;
-    try {
-      parsed = JSON.parse(raw) as RawPlanResponse;
-    } catch {
-      log.error('Gemini returned invalid JSON for generatePlan:\n%s', raw);
-      throw new AppError('AI plan generation failed — invalid response format', 500);
-    }
+    const raw    = await this.callGemini(prompt);
+    const parsed = this.parseJson<RawPlanResponse>(raw, 'generatePlan');
 
     this.validatePlan(parsed.dailyPlan);
     return parsed.dailyPlan;
@@ -148,27 +144,31 @@ Return only valid JSON.
 
   // ── generateDailyTasks ──────────────────────────────────────────────────────
   // Called every morning by the cron job.
-  // Returns today's tasks with real goalIds resolved from goalIndex.
+  // Uses yesterday's TaskLog + parent's requested routine to adapt tasks.
 
   async generateDailyTasks(input: GenerateDailyTasksInput): Promise<AiTask[]> {
-    log.info(
-      'Generating daily tasks (week %d, child age: %d months)',
-      input.currentWeek,
-      input.childAgeMonths,
-    );
+    log.info('Generating daily tasks (week %d, child age: %d months)', input.currentWeek, input.childAgeMonths);
 
     const weekFocus = input.weeklyFocusAreas.find((w) => w.week === input.currentWeek);
 
+    // FIX: build routine section properly — was a dead comment before
+    const routineSection = input.parentRequestedRoutine.length
+      ? `Parent's requested routine for today (weave goal tasks around this):\n` +
+        input.parentRequestedRoutine.map((r) => `  ${r.time}: ${r.task}`).join('\n')
+      : `Parent's requested routine: not specified — use your best judgement for the day's structure.`;
+
     const prompt = `
 You are an expert early childhood development planner for a professional nanny care platform in India.
-You create daily activity schedules that a trained nanny can execute without specialist equipment.
+You generate a daily activity schedule for a trained nanny to execute.
 
 Rules:
-- Total structured activity: 120-180 minutes across the day.
-- Vary categories — never two consecutive tasks of the same category.
-- Tasks ordered chronologically by scheduledTime.
-- Each task maps to exactly one goal via goalIndex (0-based index into goals array).
-- All string fields must be specific and actionable.
+- Total structured activity: 120-180 minutes spread across the day.
+- Vary categories — never schedule two consecutive tasks of the same category.
+- Tasks must be ordered chronologically by scheduledTime.
+- Each task must map to exactly one goal via goalIndex (0-based index into goals array).
+- Respect the parent's requested routine where possible — weave goal tasks around it.
+- materials, successIndicators, skipIf, ifTooEasy, ifTooHard must be specific and actionable.
+- Adapt difficulty based on yesterday's performance — if child struggled, reduce difficulty. If too easy, increase.
 
 Your output must be a single valid JSON object. No markdown, no backticks, no explanation.
 Schema:
@@ -190,33 +190,32 @@ Schema:
   }]
 }
 
-// Parent's goal prompt: " "
+Parent's overall goal for their child:
+"${input.parentGoalPrompt}"
 
 Child info:
 - Age: ${input.childAgeMonths} months
 - Gender: ${input.childGender}
 
-Overall strategy: "${input.overallStrategy}"
+Overall strategy for this booking:
+"${input.overallStrategy}"
 
-Week ${input.currentWeek} focus: "${weekFocus?.focus ?? 'Continue with previous week goals'}"
+Week ${input.currentWeek} focus:
+"${weekFocus?.focus ?? 'Continue building on previous week'}"
 
-Previous day: "${input.previousTaskSummary || 'First day — no previous data.'}"
+${routineSection}
 
-Goals (0-based index):
+Yesterday's task summary (adapt today based on this):
+${input.previousTaskSummary}
+
+Goals (reference by goalIndex in tasks):
 ${this.formatGoals(input.goals)}
 
 Return only valid JSON.
     `.trim();
 
-    const raw = await this.callGemini(prompt);
-
-    let parsed: RawTasksResponse;
-    try {
-      parsed = JSON.parse(raw) as RawTasksResponse;
-    } catch {
-      log.error('Gemini returned invalid JSON for generateDailyTasks:\n%s', raw);
-      throw new AppError('AI task generation failed — invalid response format', 500);
-    }
+    const raw    = await this.callGemini(prompt);
+    const parsed = this.parseJson<RawTasksResponse>(raw, 'generateDailyTasks');
 
     if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
       throw new AppError('AI returned no tasks', 500);
@@ -226,7 +225,7 @@ Return only valid JSON.
     return parsed.tasks.map((t) => {
       const goal = input.goals[t.goalIndex];
       if (!goal) {
-        log.warn('Task "%s" has invalid goalIndex %d', t.title, t.goalIndex);
+        log.warn('Task "%s" has invalid goalIndex %d — goal link will be null', t.title, t.goalIndex);
       }
       return {
         goalId:            goal?.id            ?? '',
@@ -248,8 +247,6 @@ Return only valid JSON.
 
   // ── Private helpers ─────────────────────────────────────────────────────────
 
-  // Calls Gemini and returns cleaned plain text.
-  // Strips markdown fences Gemini adds despite being told not to.
   private async callGemini(prompt: string): Promise<string> {
     const model  = this.gemini.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
     const result = await model.generateContent(prompt);
@@ -257,11 +254,21 @@ Return only valid JSON.
 
     if (!raw) throw new AppError('Gemini returned an empty response', 500);
 
+    // Strip markdown fences Gemini adds despite instructions
     return raw
       .replace(/^```json\s*/i, '')
       .replace(/^```\s*/i,     '')
       .replace(/```\s*$/i,     '')
       .trim();
+  }
+
+  private parseJson<T>(raw: string, context: string): T {
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      log.error('Gemini returned invalid JSON in %s:\n%s', context, raw);
+      throw new AppError(`AI response was not valid JSON (${context})`, 500);
+    }
   }
 
   private formatGoals(goals: GoalContext[]): string {
@@ -276,65 +283,9 @@ Return only valid JSON.
   }
 
   private validatePlan(plan: AiDailyPlan): void {
-    if (!plan.overallStrategy)          throw new AppError('AI plan missing overallStrategy', 500);
-    if (!plan.weeklyFocusAreas?.length) throw new AppError('AI plan missing weeklyFocusAreas', 500);
-    if (!plan.difficultyLevel)          throw new AppError('AI plan missing difficultyLevel', 500);
-    if (!plan.totalPlannedMinutes)      throw new AppError('AI plan missing totalPlannedMinutes', 500);
+    if (!plan?.overallStrategy)          throw new AppError('AI plan missing overallStrategy', 500);
+    if (!plan?.weeklyFocusAreas?.length) throw new AppError('AI plan missing weeklyFocusAreas', 500);
+    if (!plan?.difficultyLevel)          throw new AppError('AI plan missing difficultyLevel', 500);
+    if (!plan?.totalPlannedMinutes)      throw new AppError('AI plan missing totalPlannedMinutes', 500);
   }
 }
-
-// test-claude.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// Reads prompt.txt → fires Claude API → logs raw JSON response
-
-// Run:
-//   ANTHROPIC_API_KEY=your_key npx ts-node test-claude.ts
-// ─────────────────────────────────────────────────────────────────────────────
-
-// import fs from "fs";
-// import path from "path";
-// import { GoogleGenerativeAI } from "@google/generative-ai";
-
-// async function main() {
-//   // 1. Read the prompt from the text file
-//   const promptPath = path.join(__dirname, "../prompts/prompt.txt");
-//   const prompt = fs.readFileSync(promptPath, "utf-8").trim();
-
-//   console.log("─────────────────────────────────");
-//   console.log("PROMPT:");
-//   console.log(prompt);
-//   console.log("─────────────────────────────────");
-
-//   // 2. Fire Gemini API
-//   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-//   console.log(process.env.GEMINI_API_KEY)
-//   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
-//   const result = await model.generateContent(prompt);
-//   const rawText = result.response.text().trim();
-
-//   console.log("RAW RESPONSE FROM GEMINI:");
-//   console.log(rawText);
-//   console.log("─────────────────────────────────");
-
-//   // 3. Parse as JSON to verify it worked
-//   // Gemini sometimes wraps response in ```json ... ``` — strip it
-//   const cleaned = rawText
-//     .replace(/^```json\s*/i, "")
-//     .replace(/^```\s*/i, "")
-//     .replace(/```\s*$/i, "")
-//     .trim();
-
-//   try {
-//     const parsed = JSON.parse(cleaned);
-//     console.log("PARSED JSON:");
-//     console.log(JSON.stringify(parsed, null, 2));
-//     console.log("─────────────────────────────────");
-//     console.log("✅ Gemini integration working.");
-//   } catch (err) {
-//     console.error("❌ Response is not valid JSON:", err);
-//     console.log("Raw text was:", rawText);
-//   }
-// }
-
-// main().catch(console.error);

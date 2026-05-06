@@ -3,16 +3,15 @@
  *
  * Orchestrates the AI planning pipeline.
  * Reads from DB → calls AiService → writes results back to DB.
- * No Gemini logic lives here — that is ai.service.ts's job.
  *
- * Fixes applied:
- *   1. forDate stored as noon UTC (avoids IST/UTC bleed)
- *   2. All date queries use UTC
- *   3. buildPreviousDaySummary date order fixed (setDate before setUTCHours)
- *   4. todayMidnight defined before use in planTask.create
- *   5. parentGoalPrompt passed correctly from booking.parentGoalPrompt
- *   6. parentRequestedRoutine wired in from requestedDayWiseDailyPlan
- *   7. yesterday/yesterdayEnd unused variables removed from generateDailyTasks
+ * Fixes in this version vs uploaded file:
+ *   1. getDailyPlan uses setUTCHours not setHours
+ *   2. forDate stored as noon UTC (no IST bleed)
+ *   3. todayMidnight defined before planTask.create
+ *   4. parentGoalPrompt restored in generateDailyTasks call
+ *   5. parentRequestedRoutine loaded and passed to AI
+ *   6. unused yesterday/yesterdayEnd removed from generateDailyTasks
+ *   7. assessYesterday included (uses prisma as any until schema generate)
  */
 
 import { prisma }                 from "../config/prisma";
@@ -37,13 +36,9 @@ export class PlanService {
     const plan = await prisma.dailyPlan.findUnique({
       where:   { bookingId },
       include: {
-        booking: {
-          include: { nanny: true },
-        },
+        booking: { include: { nanny: true } },
         tasks: {
-          where: {
-            forDate: { gte: todayStart, lte: todayEnd },
-          },
+          where: { forDate: { gte: todayStart, lte: todayEnd } },
         },
       },
     });
@@ -62,7 +57,7 @@ export class PlanService {
 
   // ── generatePlan ────────────────────────────────────────────────────────────
   // Called at 12 AM on the day the booking starts (by the cron job).
-  // childGoals is a direct relation on Booking — no ChildCollectionOfGoals.
+  // childGoals is a direct relation on Booking.
 
   async generatePlan(bookingId: string) {
     log.info("generatePlan called for booking: %s", bookingId);
@@ -73,8 +68,8 @@ export class PlanService {
         children:   true,
         childGoals: true,
         requestedDayWiseDailyPlan: {
-          include:  { requestedDailyPlan: true },
-          orderBy:  { date: "desc" },
+          include: { requestedDailyPlan: true },
+          orderBy: { date: "desc" },
         },
       },
     });
@@ -94,11 +89,9 @@ export class PlanService {
       (1000 * 60 * 60 * 24),
     );
 
-    // Use booking.parentGoalPrompt as the overall prompt.
-    // Fall back to first goal's parentDescription if not set.
-    const parentGoalPrompt =
-      booking.parentGoalPrompt?.trim() ||
-      booking.childGoals[0].parentDescription;
+  const parentGoalPrompt = booking.childGoals
+    .map((g) => g.parentDescription)
+    .join(". ");
 
     const aiPlan = await aiService.generatePlan({
       parentGoalPrompt,
@@ -123,7 +116,6 @@ export class PlanService {
     });
     log.info("DailyPlan saved: %s", dailyPlan.id);
 
-    // Generate today's tasks immediately so nanny dashboard isn't empty
     await this.generateDailyTasks(bookingId);
 
     await prisma.booking.update({
@@ -148,7 +140,6 @@ export class PlanService {
           include: {
             children:   true,
             childGoals: true,
-            // Load requestedDayWiseDailyPlan ordered latest first for fallback
             requestedDayWiseDailyPlan: {
               include: { requestedDailyPlan: true },
               orderBy: { date: "desc" },
@@ -176,17 +167,17 @@ export class PlanService {
     );
     const currentWeek = Math.min(Math.floor(daysSinceStart / 7) + 1, 5);
 
-    // ── Pick parent's requested routine for today, fall back to latest ────────
+    // ── Today midnight UTC ────────────────────────────────────────────────────
     const todayMidnight = new Date();
     todayMidnight.setUTCHours(0, 0, 0, 0);
 
+    // ── Pick parent's requested routine for today, fall back to latest ────────
     const dayWisePlans  = booking.requestedDayWiseDailyPlan;
     const todaysDayWise = dayWisePlans.find((d) => {
       const d0 = new Date(d.date);
       d0.setUTCHours(0, 0, 0, 0);
       return d0.getTime() === todayMidnight.getTime();
     });
-    // orderBy date desc → [0] is the most recent entry
     const activeDayWise = todaysDayWise ?? dayWisePlans[0] ?? null;
 
     const parentRequestedRoutine: { time: string; task: string }[] =
@@ -194,7 +185,7 @@ export class PlanService {
         (p) => p.additionalNotes as { time: string; task: string }[],
       ) ?? [];
 
-    // ── Yesterday's task summary for AI context ───────────────────────────────
+    // ── Yesterday's summary for AI context ───────────────────────────────────
     const previousTaskSummary = await this.buildPreviousDaySummary(dailyPlan.id);
 
     const weeklyFocusAreas = dailyPlan.weeklyFocusAreas as {
@@ -202,10 +193,9 @@ export class PlanService {
       focus: string;
     }[];
 
-    const parentGoalPrompt =
-      booking.parentGoalPrompt?.trim() ||
-      booking.childGoals[0]?.parentDescription ||
-      "";
+    const parentGoalPrompt = booking.childGoals
+    .map((g) => `${g.name}: ${g.parentDescription}`)
+    .join(". ");
 
     const aiTasks = await aiService.generateDailyTasks({
       parentGoalPrompt,
@@ -219,9 +209,7 @@ export class PlanService {
       parentRequestedRoutine,
     });
 
-    // ── Store forDate as noon UTC ─────────────────────────────────────────────
-    // Storing at 00:00 UTC causes IST dates to bleed into the previous UTC day.
-    // Noon UTC (12:00) is safe on both sides regardless of timezone.
+    // ── forDate stored as noon UTC — avoids IST/UTC midnight bleed ───────────
     const forDate = new Date(Date.UTC(
       todayMidnight.getUTCFullYear(),
       todayMidnight.getUTCMonth(),
@@ -245,7 +233,7 @@ export class PlanService {
             plan:              { connect: { id: dailyPlan.id } },
             child:             { connect: { id: child.id } },
             ...(t.goalId ? { goal: { connect: { id: t.goalId } } } : {}),
-            forDate,           // ← noon UTC, no timezone bleed
+            forDate,
             title:             t.title,
             category:          t.category,
             durationMinutes:   t.durationMinutes,
@@ -279,10 +267,9 @@ export class PlanService {
   }
 
   // ── assessYesterday ─────────────────────────────────────────────────────────
-  // Called by the cron BEFORE generateDailyTasks.
-  // Reads yesterday's PlanTask[] + TaskLog[] and writes ChildDevelopmentLog.
-  // Keep this commented out in the cron until schema changes are applied
-  // (prisma generate passes with ChildDevelopmentLog model).
+  // Called by cron BEFORE generateDailyTasks.
+  // Reads yesterday's PlanTask[] + TaskLog[] → writes ChildDevelopmentLog.
+  // Uses (prisma as any) until schema changes are applied + prisma generate run.
 
   async assessYesterday(bookingId: string): Promise<void> {
     log.info("assessYesterday called for booking: %s", bookingId);
@@ -301,7 +288,6 @@ export class PlanService {
     const booking = dailyPlan.booking;
     const child   = booking.children;
 
-    // Yesterday's full day range in UTC
     const yesterday = new Date();
     yesterday.setUTCDate(yesterday.getUTCDate() - 1);
     yesterday.setUTCHours(0, 0, 0, 0);
@@ -316,11 +302,10 @@ export class PlanService {
     });
 
     if (!tasks.length) {
-      log.info("No tasks found for yesterday — skipping assessment for booking: %s", bookingId);
+      log.info("No tasks for yesterday — skipping assessment for booking: %s", bookingId);
       return;
     }
 
-    // Group by category
     const byCategory: Record<string, typeof tasks> = {};
     for (const task of tasks) {
       if (!byCategory[task.category]) byCategory[task.category] = [];
@@ -370,9 +355,9 @@ export class PlanService {
 
       const aiObservation = [
         `${completed}/${total} tasks completed (${progressPct}%)`,
-        skipped > 0       ? `${skipped} skipped`               : null,
-        avgEngagement     ? `avg engagement: ${avgEngagement}/5` : null,
-        avgMood           ? `avg mood: ${avgMood}/5`             : null,
+        skipped > 0   ? `${skipped} skipped`                : null,
+        avgEngagement ? `avg engagement: ${avgEngagement}/5` : null,
+        avgMood       ? `avg mood: ${avgMood}/5`             : null,
       ].filter(Boolean).join(", ");
 
       const aiSummary =
@@ -384,6 +369,7 @@ export class PlanService {
 
       const categoryGoals = booking.childGoals.filter((g) => g.category === category);
 
+      // Uses (prisma as any) until ChildDevelopmentLog schema is applied
       await (prisma as any).childDevelopmentLog.create({
         data: {
           child:           { connect: { id: child.id } },
@@ -404,7 +390,6 @@ export class PlanService {
         },
       });
 
-      // Update ChildGoal.completionPct + advance milestone week if doing well
       for (const goal of categoryGoals) {
         const goalTasks     = categoryTasks.filter((t) => t.goalId === goal.id);
         if (!goalTasks.length) continue;
@@ -427,17 +412,16 @@ export class PlanService {
       };
     }
 
-    // Merge into Children.developmentSummary — don't overwrite other categories
     const existingChild = await prisma.children.findUnique({
       where:  { id: child.id },
       select: { developmentSummary: true },
     });
-    const existing = (existingChild?.developmentSummary as Record<string, unknown>) ?? {};
+    const existing = (existingChild?.developmentSummary ?? {}) as Record<string, unknown>;
     const merged   = { ...existing, ...developmentSummary };
 
     await prisma.children.update({
       where: { id: child.id },
-      data:  { developmentSummary: merged as unknown as Prisma.InputJsonValue},
+      data:  { developmentSummary: merged as unknown as Prisma.InputJsonValue },
     });
 
     log.info(
@@ -473,8 +457,6 @@ export class PlanService {
   }
 
   private async buildPreviousDaySummary(planId: string): Promise<string> {
-    // FIX: setUTCDate BEFORE setUTCHours, otherwise date subtraction
-    // resets hours to local time first
     const yesterday = new Date();
     yesterday.setUTCDate(yesterday.getUTCDate() - 1);
     yesterday.setUTCHours(0, 0, 0, 0);

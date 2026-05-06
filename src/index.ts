@@ -31,7 +31,7 @@ import { goalRouter } from "./routes/goal.routes";
 import { planRouter } from "./routes/plan.routes";
 import { registerDailyPlanJob } from "./jobs/dailyPlan.job";
 
-const serviceAccount = require("../etc/secrets/service-account.json");
+const serviceAccount = require("./etc/secrets/service-account.json");
 
 const data = admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),

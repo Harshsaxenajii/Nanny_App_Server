@@ -1243,11 +1243,11 @@ export class BookingService {
     log.info(`Booking ${bookingId} confirmed via payment`);
 
     // Fire-and-forget AI trigger — only for subscription bookings (>= 30 days)
-    if (isSubscriptionBooking(booking.scheduledStartTime, booking.scheduledEndTime)) {
-      triggerAiPlanForBooking(bookingId).catch((err:any) => {
-        log.error(`Background AI plan trigger failed for ${bookingId}: ${err.message}`);
-      });
-    }
+    // if (isSubscriptionBooking(booking.scheduledStartTime, booking.scheduledEndTime)) {
+    //   triggerAiPlanForBooking(bookingId).catch((err:any) => {
+    //     log.error(`Background AI plan trigger failed for ${bookingId}: ${err.message}`);
+    //   });
+    // }
 
     log.info(
       `[updatePlanTask] taskId=${taskId} bookingId=${bookingId} status=${body.status}`,
