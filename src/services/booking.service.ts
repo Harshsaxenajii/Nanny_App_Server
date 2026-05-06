@@ -571,7 +571,19 @@ export class BookingService {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
-    if (!booking || booking.status !== BookingStatus.PENDING_PAYMENT) return;
+    console.log("going to capture the payment");
+
+    const environment = process.env.NODE_ENV || "OFFICESETUP";
+
+    if (environment === "OFFICESETUP") {
+      if (
+        !booking ||
+        booking.status !== BookingStatus.PENDING_NANNY_CONFIRMATION
+      )
+        return;
+    } else {
+      if (!booking || booking.status !== BookingStatus.PENDING_PAYMENT) return;
+    }
 
     await prisma.booking.update({
       where: { id: bookingId },
@@ -586,14 +598,17 @@ export class BookingService {
       },
     });
 
+    console.log("payment done going for add reserve slots");
     // Block this time slot on the nanny's profile so the explore route hides her
+
     if (booking.nannyId) {
-      await addReservedSlot(
+      const data = await addReservedSlot(
         booking.nannyId,
         bookingId,
         booking.scheduledStartTime,
         booking.scheduledEndTime,
       );
+      console.log("reserve slots added going for create attendance", data);
     }
 
     // Pre-seed attendance rows for every working day
