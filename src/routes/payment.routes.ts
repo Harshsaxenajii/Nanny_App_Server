@@ -27,6 +27,16 @@ router.post('/order', validate(S.createOrder), async (req: Request, res: Respons
   } catch (e) { next(e); }
 });
 
+// POST /api/v1/payments/extension/order
+// Creates a Razorpay order for a booking extension. Call after
+// POST /api/v1/bookings/:id/extend to get the extensionId.
+router.post('/extension/order', validate(S.createExtensionOrder), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await service.createExtensionOrder(req.user!.userId, req.body.extensionId);
+    res.status(201).json({ success: true, message: 'Extension payment order created', data: result, statusCode: 201 });
+  } catch (e) { next(e); }
+});
+
 // POST /api/v1/payments/verify
 router.post('/verify', validate(S.verifyPayment), async (req: Request, res: Response, next: NextFunction) => {
   try {

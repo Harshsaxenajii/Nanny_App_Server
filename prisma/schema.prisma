@@ -442,8 +442,9 @@ model Booking {
   nanny    Nanny?   @relation("NannyBookings", fields: [nannyId], references: [id])
   children Children @relation(fields: [childrenId], references: [id])
 
-  payment  Payment?
-  chatRoom ChatRoom?
+  payments   Payment[]
+  extensions BookingExtension[]
+  chatRoom   ChatRoom?
 
   // ── Parent-filled: day-wise tasks and goals ───────────────
   // One RequestedDayWiseDailyPlan per calendar date in the booking range.
@@ -518,26 +519,62 @@ model RequestedDailyPlan {
 // MODELS — Payments & Chat
 // ─────────────────────────────────────────────────────────────
 
+enum PaymentType {
+  INITIAL
+  EXTENSION
+}
+
+enum ExtensionStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CANCELLED
+}
+
 model Payment {
-  id                String    @id @default(auto()) @map("_id") @db.ObjectId
-  bookingId         String    @unique @db.ObjectId
-  userId            String    @db.ObjectId
-  razorpayOrderId   String?   @unique
+  id                String      @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId         String      @db.ObjectId
+  userId            String      @db.ObjectId
+  razorpayOrderId   String?     @unique
   razorpayPaymentId String?
   amount            Float
-  currency          String    @default("INR")
-  status            String    @default("PENDING")
+  currency          String      @default("INR")
+  status            String      @default("PENDING")
+  type              PaymentType @default(INITIAL)
   refundId          String?
   refundAmount      Float?
   refundReason      String?
   refundedAt        DateTime?
   capturedAt        DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
 
-  booking Booking @relation(fields: [bookingId], references: [id])
+  booking   Booking          @relation(fields: [bookingId], references: [id])
+  extension BookingExtension?
 
   @@map("payments")
+}
+
+model BookingExtension {
+  id              String          @id @default(auto()) @map("_id") @db.ObjectId
+  bookingId       String          @db.ObjectId
+  previousEndTime DateTime
+  newEndTime      DateTime
+  extraDays       Int
+  workingDays     String[]        @default([])
+  baseAmount      Float
+  gstAmount       Float
+  totalAmount     Float
+  razorpayOrderId String?
+  paymentId       String?         @unique @db.ObjectId
+  status          ExtensionStatus @default(PENDING_PAYMENT)
+  pricingDetails  Json?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  booking Booking  @relation(fields: [bookingId], references: [id])
+  payment Payment? @relation(fields: [paymentId], references: [id])
+
+  @@map("booking_extensions")
 }
 
 model ChatRoom {

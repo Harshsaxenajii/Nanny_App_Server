@@ -19,4 +19,5 @@ export const Events = {
   PAYMENT_CAPTURED: "payment.captured",
   PAYMENT_FAILED: "payment.failed",
   BOOKING_CONFIRMED: "booking.confirmed",
+  EXTENSION_PAYMENT_CAPTURED: "extension.payment.captured",
 } as const;

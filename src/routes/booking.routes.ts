@@ -10,6 +10,63 @@ const service = new BookingService();
 // All booking routes require authentication
 router.use(auth);
 
+// ── POST /api/v1/bookings/:id/requested-plan ─────────────────────────────────
+// Parent adds/updates the requested daily plan for a booking.
+// Creates one RequestedDayWiseDailyPlan (with the given date) and one
+// RequestedDailyPlan under it containing all tasks. Each call is a new entry
+// so history is preserved; the frontend should send the full desired task list.
+router.post(
+  "/:id/requested-plan",
+  roles("USER"),
+  validate(S.addRequestedPlan),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await service.addRequestedPlan(
+        req.params.id,
+        req.user!.userId,
+        req.body.date,
+        req.body.tasks,
+      );
+      res.status(201).json({
+        success: true,
+        message: "Requested plan added",
+        data: result,
+        statusCode: 201,
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+// ── POST /api/v1/bookings/:id/extend ─────────────────────────────────────────
+// Parent requests a booking extension (FULL_TIME / PART_TIME only).
+// Returns the extension record + pricing. Follow up with
+// POST /api/v1/payments/extension/order to create the Razorpay order.
+router.post(
+  "/:id/extend",
+  roles("USER"),
+  validate(S.extendBooking),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await service.extendBooking(
+        req.params.id,
+        req.user!.userId,
+        req.body.newEndDate,
+        req.body.workingDays,
+      );
+      res.status(201).json({
+        success: true,
+        message: "Extension created — proceed to payment",
+        data: result,
+        statusCode: 201,
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
 // ── POST /api/v1/bookings ────────────────────────────────────────────────────
 // Parent creates a booking
 router.post(

@@ -130,6 +130,37 @@ async function removeReservedSlot(
   }
 }
 
+/** Extends the endTime of an existing reserved slot for a booking. */
+async function extendReservedSlot(
+  nannyId: string,
+  bookingId: string,
+  newEndTime: Date,
+): Promise<void> {
+  try {
+    const nanny = await prisma.nanny.findUnique({
+      where: { id: nannyId },
+      select: { reservedSlot: true },
+    });
+    if (!nanny) return;
+
+    const slots = (nanny.reservedSlot as any[]) ?? [];
+    const updated = slots.map((s: any) =>
+      s.bookingId === bookingId ? { ...s, endTime: newEndTime } : s,
+    );
+
+    await prisma.nanny.update({
+      where: { id: nannyId },
+      data: { reservedSlot: updated },
+    });
+    log.info(`[extendReservedSlot] nannyId=${nannyId} bookingId=${bookingId}`);
+  } catch (e) {
+    log.error(
+      `[extendReservedSlot] failed nannyId=${nannyId} bookingId=${bookingId}`,
+      e,
+    );
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ATTENDANCE HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -399,34 +430,30 @@ export class BookingService {
       include: { children: true },
     });
 
-    // ── 11. Create day-wise plans ────────────────────────────────────────────
+    // ── 11. Create a single day-wise plan container ──────────────────────────
+    // One RequestedDayWiseDailyPlan per booking (not per day) with all tasks
+    // stored in one RequestedDailyPlan. Updates go through the new route.
     const taskStrings: string[] = Array.isArray(body.requestedTasks)
       ? body.requestedTasks
       : [];
-    const planDates =
-      isRange && workingDayNames.length > 0
-        ? getWorkingDates(start, end, workingDayNames)
-        : (() => {
-            const d = new Date(start);
-            d.setUTCHours(0, 0, 0, 0);
-            return [d];
-          })();
 
-    if (planDates.length > 0) {
+    if (taskStrings.length > 0) {
+      const planStartDate = new Date(start);
+      planStartDate.setUTCHours(0, 0, 0, 0);
+      const dayPlan = await prisma.requestedDayWiseDailyPlan.create({
+        data: { bookingId: booking.id, date: planStartDate },
+      });
       await Promise.all(
-        planDates.map(async (planDate) => {
-          const dayPlan = await prisma.requestedDayWiseDailyPlan.create({
-            data: { bookingId: booking.id, date: planDate },
-          });
-          await prisma.requestedDailyPlan.create({
+        taskStrings.map((task) =>
+          prisma.requestedDailyPlan.create({
             data: {
               requestedDayWiseDailyPlanId: dayPlan.id,
-              name: `Daily plan – ${planDate.toDateString()}`,
+              name: task,
               status: "ACTIVE",
-              additionalNotes: taskStrings as any,
+              additionalNotes: [] as any,
             },
-          });
-        }),
+          }),
+        ),
       );
     }
 
@@ -1368,7 +1395,7 @@ export class BookingService {
         include: {
           user: { select: { id: true, name: true, mobile: true } },
           nanny: { select: { id: true, name: true, mobile: true } },
-          payment: true,
+          payments: true,
           children: true,
         },
       }),
@@ -1564,5 +1591,227 @@ export class BookingService {
       skippedTasks: mapped.filter((t) => t.status === "SKIPPED").length,
       tasks: mapped,
     };
+  }
+
+  // ── POST /api/v1/bookings/:id/requested-plan ─────────────────────────────
+  // Adds a new RequestedDayWiseDailyPlan with the tasks list for the given date.
+  // Creates exactly one container record and one plan record (no per-day fan-out).
+  async addRequestedPlan(
+    bookingId: string,
+    userId: string,
+    date: string,
+    tasks: string[],
+  ) {
+    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new AppError("Booking not found", 404);
+    if (booking.userId !== userId)
+      throw new AppError("You do not have access to this booking", 403);
+
+    const planDate = new Date(date);
+    if (isNaN(planDate.getTime())) throw new AppError("Invalid date", 400);
+    planDate.setUTCHours(0, 0, 0, 0);
+
+    const dayPlan = await prisma.requestedDayWiseDailyPlan.create({
+      data: { bookingId, date: planDate },
+    });
+    await Promise.all(
+      tasks.map((task) =>
+        prisma.requestedDailyPlan.create({
+          data: {
+            requestedDayWiseDailyPlanId: dayPlan.id,
+            name: task,
+            status: "ACTIVE",
+            additionalNotes: [] as any,
+          },
+        }),
+      ),
+    );
+
+    log.info(
+      `[addRequestedPlan] bookingId=${bookingId} date=${planDate.toISOString()} tasks=${tasks.length}`,
+    );
+    return { dayPlan };
+  }
+
+  // ── POST /api/v1/bookings/:id/extend ─────────────────────────────────────
+  // Creates a BookingExtension record for FULL_TIME or PART_TIME bookings.
+  // Returns extension details + pricing so the frontend can initiate payment.
+  async extendBooking(
+    bookingId: string,
+    userId: string,
+    newEndDate: string,
+    workingDays?: string[],
+  ) {
+    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+    if (!booking) throw new AppError("Booking not found", 404);
+    if (booking.userId !== userId)
+      throw new AppError("You do not have access to this booking", 403);
+
+    if (!["FULL_TIME", "PART_TIME"].includes(booking.serviceType))
+      throw new AppError(
+        "Extensions are only available for FULL_TIME and PART_TIME bookings",
+        400,
+      );
+
+    if (!["CONFIRMED", "IN_PROGRESS"].includes(booking.status))
+      throw new AppError(
+        `Cannot extend a booking in status: ${booking.status}`,
+        400,
+      );
+
+    const newEnd = new Date(newEndDate);
+    if (isNaN(newEnd.getTime())) throw new AppError("Invalid newEndDate", 400);
+    if (newEnd <= booking.scheduledEndTime)
+      throw new AppError("New end date must be after the current end date", 400);
+
+    const pending = await prisma.bookingExtension.findFirst({
+      where: { bookingId, status: "PENDING_PAYMENT" },
+    });
+    if (pending)
+      throw new AppError(
+        "A pending extension already exists for this booking",
+        409,
+      );
+
+    const nanny = booking.nannyId
+      ? await prisma.nanny.findUnique({ where: { id: booking.nannyId } })
+      : null;
+    if (!nanny || !nanny.hourlyRate)
+      throw new AppError(
+        "Nanny rate is not available — cannot calculate extension pricing",
+        400,
+      );
+
+    const extensionWorkingDays =
+      Array.isArray(workingDays) && workingDays.length > 0
+        ? workingDays
+        : (booking.workingDays as string[]);
+
+    const extraDates = getWorkingDates(
+      booking.scheduledEndTime,
+      newEnd,
+      extensionWorkingDays,
+    );
+    const extraDays =
+      extraDates.length > 0 ? extraDates.length : DEFAULT_MONTHLY_WORKING_DAYS;
+
+    const pricing = calcPricing({
+      serviceType: booking.serviceType,
+      hourlyRate: nanny.hourlyRate,
+      dailyRate: nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null,
+      shiftStart: booking.scheduledStartTime,
+      shiftEnd: booking.scheduledEndTime,
+      workingDays: extraDays,
+    });
+
+    const extension = await prisma.bookingExtension.create({
+      data: {
+        bookingId,
+        previousEndTime: booking.scheduledEndTime,
+        newEndTime: newEnd,
+        extraDays,
+        workingDays: extensionWorkingDays,
+        baseAmount: pricing.baseFee,
+        gstAmount: pricing.gst,
+        totalAmount: pricing.total,
+        status: "PENDING_PAYMENT",
+        pricingDetails: {
+          sessionHours: pricing.sessionHours,
+          workingDays: pricing.workingDays,
+          baseFee: pricing.baseFee,
+          platformFee: pricing.platformFee,
+          gst: pricing.gst,
+          total: pricing.total,
+          description: pricing.description,
+        },
+      },
+    });
+
+    log.info(
+      `[extendBooking] bookingId=${bookingId} extensionId=${extension.id}` +
+        ` extraDays=${extraDays} total=₹${pricing.total}`,
+    );
+    return { extension, pricing };
+  }
+
+  // ── Called by event handler after extension payment is captured ──────────
+  async handleExtensionPaymentCaptured(
+    extensionId: string,
+    paymentId?: string,
+  ) {
+    const extension = await prisma.bookingExtension.findUnique({
+      where: { id: extensionId },
+      include: { booking: true },
+    });
+    if (!extension || extension.status !== "PENDING_PAYMENT") return;
+
+    const { booking } = extension;
+
+    await prisma.$transaction([
+      prisma.bookingExtension.update({
+        where: { id: extensionId },
+        data: { status: "CONFIRMED" },
+      }),
+      prisma.booking.update({
+        where: { id: extension.bookingId },
+        data: {
+          scheduledEndTime: extension.newEndTime,
+          timeline: appendTimeline(
+            booking.timeline,
+            booking.status,
+            `Booking extended to ${extension.newEndTime.toDateString()} — payment confirmed`,
+          ) as any,
+        },
+      }),
+    ]);
+
+    // Stretch the nanny's reserved slot to the new end time
+    if (booking.nannyId) {
+      await extendReservedSlot(
+        booking.nannyId,
+        extension.bookingId,
+        extension.newEndTime,
+      );
+    }
+
+    // Seed attendance records for the extended period
+    try {
+      const dates = getWorkingDates(
+        extension.previousEndTime,
+        extension.newEndTime,
+        extension.workingDays as string[],
+      );
+      if (booking.nannyId) {
+        await Promise.all(
+          dates.map((scheduledDate) =>
+            prisma.attendanceRecord.upsert({
+              where: {
+                bookingId_scheduledDate: {
+                  bookingId: extension.bookingId,
+                  scheduledDate,
+                },
+              },
+              create: {
+                bookingId: extension.bookingId,
+                nannyId: booking.nannyId!,
+                userId: booking.userId,
+                scheduledDate,
+                status: AttendanceStatus.PENDING,
+              },
+              update: {},
+            }),
+          ),
+        );
+      }
+      log.info(
+        `[handleExtensionPaymentCaptured] extensionId=${extensionId}` +
+          ` paymentId=${paymentId} seeded=${dates.length} days`,
+      );
+    } catch (e) {
+      log.error(
+        `[handleExtensionPaymentCaptured] attendance seed failed extensionId=${extensionId}`,
+        e,
+      );
+    }
   }
 }

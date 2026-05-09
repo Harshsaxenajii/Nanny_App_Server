@@ -253,8 +253,21 @@ export const S = {
     comment: Joi.string().min(10).max(1000).required(),
   }),
 
+  /* Booking — requested plan & extension */
+  addRequestedPlan: Joi.object({
+    date: Joi.string().isoDate().required(),
+    tasks: Joi.array().items(Joi.string()).min(1).required(),
+  }),
+  extendBooking: Joi.object({
+    newEndDate: Joi.string().isoDate().required(),
+    workingDays: Joi.array()
+      .items(Joi.string().valid("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"))
+      .optional(),
+  }),
+
   /* Payment */
   createOrder: Joi.object({ bookingId: oid().required() }),
+  createExtensionOrder: Joi.object({ extensionId: oid().required() }),
   verifyPayment: Joi.object({
     razorpayOrderId: Joi.string().required(),
     razorpayPaymentId: Joi.string().required(),
