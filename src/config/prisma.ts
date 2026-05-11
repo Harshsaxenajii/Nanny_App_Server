@@ -4,10 +4,10 @@ import { createLogger } from '../utils/logger';
 const logger = createLogger('prisma');
 const g = globalThis as unknown as { _prisma?: PrismaClient };
 
-export const prisma: PrismaClient =
-  g._prisma ?? new PrismaClient({ log: ['warn', 'error'] });
-
-if (process.env.NODE_ENV !== 'production') g._prisma = prisma;
+// Always cache on globalThis — prevents multiple clients during hot-reload (dev)
+// and on serverless platforms where modules may be re-evaluated per invocation.
+if (!g._prisma) g._prisma = new PrismaClient({ log: ['warn', 'error'] });
+export const prisma: PrismaClient = g._prisma;
 
 export async function connectDB(): Promise<void> {
   await prisma.$connect();

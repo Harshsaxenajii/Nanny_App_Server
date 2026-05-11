@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: nanny-app-server
+    runtime: node
+    region: singapore   # closest to India
+    plan: free
+
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+
+    healthCheckPath: /health
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # ── Set USE_EXTERNAL_CRON=true and use cron-job.org on free tier
+      # ── Set USE_EXTERNAL_CRON=false (or remove) on paid tier to use internal crons
+      - key: USE_EXTERNAL_CRON
+        value: true
+
+      # ── Required secrets — set these in Render dashboard, NOT here ──────────
+      - key: MONGO_URI
+        sync: false           # Render will prompt you to enter this
+
+      - key: JWT_ACCESS_SECRET
+        sync: false
+
+      - key: JWT_REFRESH_SECRET
+        sync: false
+
+      - key: GEMINI_API_KEY
+        sync: false
+
+      - key: RAZORPAY_KEY_ID
+        sync: false
+
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+
+      # Paste the full service-account.json content as a single-line JSON string
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+
+      # CRON_SECRET — a random secret you set; add it as Authorization: Bearer header
+      # in cron-job.org so your cron routes are protected
+      - key: CRON_SECRET
+        sync: false

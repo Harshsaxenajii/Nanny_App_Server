@@ -8,7 +8,7 @@ import { createServer } from "http";
 import { Server as SocketServer } from "socket.io";
 
 import { config } from "./config";
-import { connectDB, disconnectDB, prisma } from "./config/prisma";
+import { connectDB, disconnectDB } from "./config/prisma";
 import { createLogger } from "./utils/logger";
 import { registerEventHandlers } from "./utils/eventHandlers";
 import { JwtUtils } from "./utils/jwt";
@@ -31,12 +31,28 @@ import { goalRouter } from "./routes/goal.routes";
 import { planRouter } from "./routes/plan.routes";
 import { registerDailyPlanJob } from "./jobs/dailyPlan.job";
 
-const serviceAccount = require("/etc/secrets/service-account.json");
-// const serviceAccount = require("../service-account.json");
+// Load Firebase service account from env var (production) or local file (dev)
+function loadFirebaseCredential(): admin.credential.Credential {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
+      const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      return admin.credential.cert(sa);
+    } catch {
+      log.error("FIREBASE_SERVICE_ACCOUNT env var is not valid JSON — Firebase disabled");
+      return admin.credential.applicationDefault();
+    }
+  }
+  // Fallback to local file for local development
+  try {
+    const sa = require("../service-account.json");
+    return admin.credential.cert(sa);
+  } catch {
+    log.warn("service-account.json not found and FIREBASE_SERVICE_ACCOUNT not set — push notifications disabled");
+    return admin.credential.applicationDefault();
+  }
+}
 
-const data = admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+admin.initializeApp({ credential: loadFirebaseCredential() });
 
 const log = createLogger("app");
 const app = express();
@@ -118,23 +134,8 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 /* ── Health check ───────────────────────────────────────────────────────── */
-app.get("/health", async (_req, res) => {
-  const data = await prisma.booking.findUnique({
-    where: {
-      id: "69e202768ff166a3ebbacb12",
-    },
-    include: {
-      childGoals: true,
-      dailyPlan: {
-        include: {
-          tasks: true,
-        },
-      },
-      // requestedDayWiseDailyPlan:true,
-    },
-  });
+app.get("/health", (_req, res) => {
   res.json({
-    data: data,
     status: "ok",
     service: "nanny-app",
     env: config.env,
@@ -182,9 +183,15 @@ async function start() {
     }
   }
 
-  // register jobs (AI)
-
-  registerDailyPlanJob();
+  // Register internal cron jobs only when NOT using an external scheduler.
+  // On Render free tier or any platform where you use cron-job.org to hit
+  // the /api/v1/plan/cron/* routes, set USE_EXTERNAL_CRON=true in env vars.
+  if (process.env.USE_EXTERNAL_CRON !== "true") {
+    registerDailyPlanJob();
+    log.info("Internal cron jobs registered");
+  } else {
+    log.info("USE_EXTERNAL_CRON=true — skipping internal cron registration (using external scheduler)");
+  }
 
   httpServer.listen(config.port, () => {
     log.info(`✅ Nanny App running on port ${config.port} [${config.env}]`);
