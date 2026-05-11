@@ -160,7 +160,7 @@ export class GoalService {
     });
 
     // Upsert TaskLog (nanny can edit before end of day)
-    return prisma.taskLog.upsert({
+    const taskLog = await prisma.taskLog.upsert({
       where:  { taskId },
       update: {
         completionPct:    body.completionPct,
@@ -179,5 +179,36 @@ export class GoalService {
         completedAt:      body.status === 'COMPLETED' ? new Date() : null,
       },
     });
+
+    // If this is a goal-related task, recompute the running dayScore on the DailyPlan.
+    // This feeds into tomorrow's AI generation (AI adapts difficulty based on score).
+    if (task.goalId) {
+      const forDateStart = new Date(task.forDate);
+      forDateStart.setUTCHours(0, 0, 0, 0);
+      const forDateEnd = new Date(forDateStart.getTime() + 86400000 - 1);
+
+      const goalTasks = await prisma.planTask.findMany({
+        where: {
+          planId:  task.planId,
+          forDate: { gte: forDateStart, lte: forDateEnd },
+          goalId:  { not: null },
+        },
+        include: { log: true },
+      });
+
+      const loggedGoalTasks = goalTasks.filter((t) => t.log !== null);
+      if (loggedGoalTasks.length > 0) {
+        const dayScore = Math.round(
+          loggedGoalTasks.reduce((sum, t) => sum + (t.log!.completionPct || 0), 0) /
+          loggedGoalTasks.length,
+        );
+        await prisma.dailyPlan.update({
+          where: { id: task.planId },
+          data:  { dayScore, dayScoreAt: new Date() },
+        });
+      }
+    }
+
+    return taskLog;
   }
 }

@@ -1,86 +1,72 @@
 /**
  * dailyPlan.job.ts
  *
- * Two separate cron jobs:
+ * Three cron jobs registered via registerDailyPlanJob().
+ * Call once after DB connects in index.ts.
  *
- *   JOB 1 — midnight (12:00 AM IST = 18:30 UTC)
- *     Finds bookings STARTING today that have been paid (CONFIRMED status)
- *     and have child goals set. Calls generatePlan() once per booking.
- *     This creates the master DailyPlan + day 1 PlanTask[].
- *     Never runs again for the same booking (aiPlanGenerated flag).
+ * JOB 1 — midnight (default: 11:30 PM IST = 18:00 UTC)
+ *   Finds all CONFIRMED FULL_TIME bookings that have ChildGoals set but no AI plan yet.
+ *   Calls generatePlan() for each → creates master DailyPlan + day-1 PlanTask[].
+ *   The aiPlanGenerated flag ensures it never runs twice for the same booking.
  *
- *   JOB 2 — early morning (5:00 AM IST = 23:30 UTC previous day)
- *     Finds all active bookings where AI plan already exists.
- *     For each: assessYesterday() → then generateDailyTasks().
- *     lastGeneratedDate guard prevents double-run if cron fires twice.
+ * JOB 2 — 5 AM IST (default: 23:30 UTC previous day)
+ *   Finds all active bookings (started, not ended, AI plan exists).
+ *   For each: assessYesterday() → generateDailyTasks().
+ *   lastGeneratedDate guard prevents double-run if cron fires twice.
  *
- * Both jobs are registered via registerDailyPlanJob().
- * Call this once after DB connects in index.ts.
+ * JOB 3 — 1st of month at 1:30 AM IST (default: 20:00 UTC on 1st)
+ *   Finds all children with ChildDevelopmentLog records in the previous month.
+ *   Calls generateMonthlySummary() → stores AI narrative in Children.developmentSummary.
+ *
+ * All three jobs are also exported as standalone async functions for manual testing
+ * via the plan routes (POST /api/v1/plan/cron/midnight|morning|monthly).
  */
 
-import cron from "node-cron";
-import { prisma } from "../config/prisma";
-import { PlanService } from "../services/plan.service";
-import { createLogger } from "../utils/logger";
+import cron         from 'node-cron';
+import { prisma }   from '../config/prisma';
+import { PlanService } from '../services/plan.service';
+import { createLogger } from '../utils/logger';
 
-const log = createLogger("dailyPlan.job");
+const log         = createLogger('dailyPlan.job');
 const planService = new PlanService();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JOB 1 — Midnight: generate master plan for bookings starting today
+// JOB 1 — Midnight: generate master plans for new unplanned bookings
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function runMidnightPlanJob() {
-  log.info("[midnight] Master plan job started");
+  log.info('[midnight] Master plan job started');
 
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-  const todayEnd = new Date(today.getTime() + 86400000 - 1);
-
-  // Find bookings that:
-  //   - Start today (scheduledStartTime falls within today UTC)
-  //   - Payment confirmed (status = CONFIRMED or NANNY_ASSIGNED or IN_PROGRESS)
-  //   - Have NOT had AI plan generated yet
-  //   - Have at least one ChildGoal (pro-plan bookings only)
+  // All CONFIRMED FULL_TIME bookings that have goals but no AI plan yet.
+  // No start-date filter — the plan is generated as soon as the booking is confirmed,
+  // so the nanny can see the strategy before day 1 begins.
   const newBookings = await prisma.booking.findMany({
     where: {
       aiPlanGenerated: false,
-      // scheduledStartTime: { gte: today, lte: todayEnd },
-      serviceType:"FULL_TIME",
-      status: { in: ["CONFIRMED", "IN_PROGRESS"] },
-      childGoals: { some: {} },
+      serviceType:     'FULL_TIME',
+      status:          { in: ['CONFIRMED', 'IN_PROGRESS'] },
+      childGoals:      { some: {} },
     },
     select: { id: true },
   });
 
-  log.info(
-    `[midnight] Bookings starting today with goals: ${newBookings.length}`,
-
-  );
+  log.info('[midnight] Unplanned bookings with goals: %d', newBookings.length);
 
   const results = { success: 0, failed: 0 };
 
-  let i = 0;
   for (const { id } of newBookings) {
-    if (i >= 2) {
-      return;
-    }
     try {
       await planService.generatePlan(id);
-      log.info("[midnight] Booking %s — master plan + day 1 tasks done", id);
+      log.info('[midnight] Booking %s — master plan + day-1 tasks done', id);
       results.success++;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      log.error(`[midnight] Booking ${id} — generatePlan failed: ${message}`);
+      log.error('[midnight] Booking %s — generatePlan failed: %s', id, message);
       results.failed++;
-    } finally {
-      i++;
     }
   }
 
-  log.info(
-    `[midnight] Master plan job complete — success: ${results.success}, failed: ${results.failed}`
-  );
+  log.info('[midnight] Done — success: %d, failed: %d', results.success, results.failed);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -88,36 +74,32 @@ export async function runMidnightPlanJob() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function runMorningTaskJob() {
-  log.info("[5am] Daily task job started");
+  log.info('[5am] Daily task job started');
 
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
   const todayEnd = new Date(today.getTime() + 86400000 - 1);
 
-  // Find bookings that:
-  //   - Are currently active (today falls within booking range)
-  //   - Already have a master AI plan generated
-  //   - Nanny is working (correct status)
   const activeBookings = await prisma.booking.findMany({
     where: {
-      aiPlanGenerated: true,
-      scheduledStartTime: { lte: todayEnd },
-      scheduledEndTime: { gte: today },
-      status: { in: ["CONFIRMED", "IN_PROGRESS"] },
+      aiPlanGenerated:    true,
+      serviceType:        'FULL_TIME',       // AI planning is FULL_TIME only
+      scheduledStartTime: { lte: todayEnd }, // booking must have started by today
+      scheduledEndTime:   { gte: today },    // and must not have ended yet
+      status:             { in: ['CONFIRMED', 'IN_PROGRESS'] },
     },
     select: { id: true },
   });
 
-  log.info(`[5am] Active bookings to process: ${activeBookings.length}`);
+  log.info('[5am] Active bookings to process: %d', activeBookings.length);
 
   const results = { success: 0, skipped: 0, failed: 0 };
 
   for (const { id } of activeBookings) {
     try {
-      // Guard: skip if tasks already generated today
-      // Safe to re-run the cron manually without double-charging the AI
+      // Skip if today's tasks already generated (idempotency guard)
       const existingPlan = await prisma.dailyPlan.findUnique({
-        where: { bookingId: id },
+        where:  { bookingId: id },
         select: { lastGeneratedDate: true },
       });
 
@@ -125,82 +107,117 @@ export async function runMorningTaskJob() {
         const lastGen = new Date(existingPlan.lastGeneratedDate);
         lastGen.setUTCHours(0, 0, 0, 0);
         if (lastGen.getTime() === today.getTime()) {
-          log.info(`[5am] Booking ${id} — already generated today, skipping`);
+          log.info('[5am] Booking %s — already generated today, skipping', id);
           results.skipped++;
           continue;
         }
       }
 
-      // Assess yesterday → writes ChildDevelopmentLog + updates ChildGoal fields
-      // IMPORTANT: runs BEFORE generateDailyTasks because generateDailyTasks
-      // calls deleteMany on today's tasks — yesterday's tasks (different forDate)
-      // are untouched, so assessment always reads clean historical data.
-      //
-      // KEEP COMMENTED until schema changes applied + npx prisma generate passes:
-      // await planService.assessYesterday(id);
+      // Step 1: assess yesterday → writes ChildDevelopmentLog, updates DailyPlan.dayScore
+      // IMPORTANT: runs BEFORE generateDailyTasks so yesterday's data is clean
+      // (generateDailyTasks only deletes TODAY's tasks, not yesterday's)
+      await planService.assessYesterday(id);
 
-      // Generate today's tasks from yesterday's summary + parent routine
+      // Step 2: generate today's blended tasks using yesterday's score
       const tasks = await planService.generateDailyTasks(id);
-      log.info(`[5am] Booking ${id} — ${tasks.length} tasks generated`);
+      log.info('[5am] Booking %s — %d tasks generated', id, tasks.length);
       results.success++;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      log.error(`[5am] Booking ${id} — failed: ${message}`);
+      log.error('[5am] Booking %s — failed: %s', id, message);
       results.failed++;
     }
   }
 
-  log.info(
-    `[5am] Daily task job complete — success: ${ results.success}, skipped: ${results.skipped}, failed: ${results.failed}`
-  );
+  log.info('[5am] Done — success: %d, skipped: %d, failed: %d', results.success, results.skipped, results.failed);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Register both crons — call once after DB connects in index.ts
+// JOB 3 — 1st of month: generate monthly summary for all active children
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function runMonthlySummaryJob() {
+  log.info('[monthly] Monthly summary job started');
+
+  const now = new Date();
+  // We're running on the 1st of the CURRENT month → summarise the PREVIOUS month
+  const targetYear  = now.getUTCMonth() === 0 ? now.getUTCFullYear() - 1 : now.getUTCFullYear();
+  const targetMonth = now.getUTCMonth() === 0 ? 12 : now.getUTCMonth(); // 1-based
+
+  const monthStart = new Date(Date.UTC(targetYear, targetMonth - 1, 1));
+  const monthEnd   = new Date(Date.UTC(targetYear, targetMonth, 0, 23, 59, 59, 999));
+
+  // Find distinct child IDs that have development logs in the target month
+  const logs = await prisma.childDevelopmentLog.findMany({
+    where:  { loggedAt: { gte: monthStart, lte: monthEnd } },
+    select: { childId: true },
+  });
+  const childIds = [...new Set(logs.map((l) => l.childId))];
+
+  log.info('[monthly] Children to summarise: %d (month: %d-%d)', childIds.length, targetYear, targetMonth);
+
+  const results = { success: 0, failed: 0 };
+
+  for (const childId of childIds) {
+    try {
+      await planService.generateMonthlySummary(childId, targetYear, targetMonth);
+      results.success++;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error('[monthly] Child %s — failed: %s', childId, message);
+      results.failed++;
+    }
+  }
+
+  log.info('[monthly] Done — success: %d, failed: %d', results.success, results.failed);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Register all crons — call once after DB connects in index.ts
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function registerDailyPlanJob() {
-  // 12:00 AM IST = 18:30 UTC (previous calendar day)
-  const midnightSchedule = process.env.MIDNIGHT_PLAN_CRON ?? "32 14 * * *";
+  // 11:30 PM IST = 18:00 UTC  (generates plan for tomorrow's bookings starting at midnight IST)
+  const midnightSchedule = process.env.MIDNIGHT_PLAN_CRON ?? '0 18 * * *';
 
-  // 05:00 AM IST = 23:30 UTC (previous calendar day)
-  const morningSchedule = process.env.MORNING_TASK_CRON ?? "30 23 * * *";
+  // 5:00 AM IST = 23:30 UTC previous day
+  const morningSchedule  = process.env.MORNING_TASK_CRON  ?? '30 23 * * *';
 
-  if (!cron.validate(midnightSchedule)) {
-    throw new Error(
-      `Invalid cron expression for midnight job: "${midnightSchedule}"`
-    );
+  // 1st of month at 1:30 AM IST = 20:00 UTC on 1st of month
+  const monthlySchedule  = process.env.MONTHLY_SUMMARY_CRON ?? '0 20 1 * *';
+
+  for (const [name, expr] of [
+    ['midnight', midnightSchedule],
+    ['morning',  morningSchedule],
+    ['monthly',  monthlySchedule],
+  ] as [string, string][]) {
+    if (!cron.validate(expr)) {
+      throw new Error(`Invalid cron expression for ${name} job: "${expr}"`);
+    }
   }
-  if (!cron.validate(morningSchedule)) {
-    throw new Error(
-      `Invalid cron expression for morning job: "${morningSchedule}"`
-    );
-  }
 
-  log.info(
-    `Registering midnight plan job  — schedule: ${midnightSchedule} (UTC)`
-  );
-  log.info(
-    `Registering 5am task job       — schedule: ${morningSchedule} (UTC)`
-  );
+  log.info('Registering midnight plan job  — schedule: %s (UTC)', midnightSchedule);
+  log.info('Registering 5am task job       — schedule: %s (UTC)', morningSchedule);
+  log.info('Registering monthly summary job — schedule: %s (UTC)', monthlySchedule);
 
-  // JOB 1 — midnight
   cron.schedule(midnightSchedule, async () => {
-    try {
-      await runMidnightPlanJob();
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.error(`[midnight] Unhandled error: ${message}`);
+    try { await runMidnightPlanJob(); }
+    catch (err: unknown) {
+      log.error('[midnight] Unhandled error: %s', err instanceof Error ? err.message : String(err));
     }
   });
 
-  // JOB 2 — 5 AM
   cron.schedule(morningSchedule, async () => {
-    try {
-      await runMorningTaskJob();
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.error(`[5am] Unhandled error: ${message}`);
+    try { await runMorningTaskJob(); }
+    catch (err: unknown) {
+      log.error('[5am] Unhandled error: %s', err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  cron.schedule(monthlySchedule, async () => {
+    try { await runMonthlySummaryJob(); }
+    catch (err: unknown) {
+      log.error('[monthly] Unhandled error: %s', err instanceof Error ? err.message : String(err));
     }
   });
 }

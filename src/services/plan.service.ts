@@ -4,29 +4,28 @@
  * Orchestrates the AI planning pipeline.
  * Reads from DB → calls AiService → writes results back to DB.
  *
- * Fixes in this version vs uploaded file:
- *   1. getDailyPlan uses setUTCHours not setHours
- *   2. forDate stored as noon UTC (no IST bleed)
- *   3. todayMidnight defined before planTask.create
- *   4. parentGoalPrompt restored in generateDailyTasks call
- *   5. parentRequestedRoutine loaded and passed to AI
- *   6. unused yesterday/yesterdayEnd removed from generateDailyTasks
- *   7. assessYesterday included (uses prisma as any until schema generate)
+ * Public methods:
+ *   generatePlan(bookingId)               — called at midnight for new bookings
+ *   generateDailyTasks(bookingId)         — called every 5 AM for active bookings
+ *   assessYesterday(bookingId)            — called before generateDailyTasks; writes ChildDevelopmentLog
+ *   generateMonthlySummary(childId, y, m) — called 1st of month; writes Children.developmentSummary
+ *   getDailyPlan(bookingId, userId, role) — read today's plan + tasks
  */
 
-import { prisma }                 from "../config/prisma";
-import { AppError }               from "../utils/AppError";
-import { createLogger }           from "../utils/logger";
-import { AiService, GoalContext } from "./ai.service";
-import { ageInMonths }            from "../utils/goalTemplates";
-import { Prisma }                 from "@prisma/client";
+import { prisma }                 from '../config/prisma';
+import { AppError }               from '../utils/AppError';
+import { createLogger }           from '../utils/logger';
+import { AiService, GoalContext } from './ai.service';
+import { ageInMonths }            from '../utils/goalTemplates';
+import { GoalCategory, Prisma }   from '@prisma/client';
 
-const log       = createLogger("plan");
+const log       = createLogger('plan');
 const aiService = new AiService();
 
 export class PlanService {
 
   // ── getDailyPlan ────────────────────────────────────────────────────────────
+
   async getDailyPlan(bookingId: string, userId: string, role: string) {
     const todayStart = new Date();
     todayStart.setUTCHours(0, 0, 0, 0);
@@ -38,29 +37,32 @@ export class PlanService {
       include: {
         booking: { include: { nanny: true } },
         tasks: {
-          where: { forDate: { gte: todayStart, lte: todayEnd } },
+          where:   { forDate: { gte: todayStart, lte: todayEnd } },
+          orderBy: { scheduledTime: 'asc' },
+          include: { goal: true, log: true },
         },
       },
     });
 
-    if (!plan) throw new AppError("Daily Plan not found", 404);
+    if (!plan) throw new AppError('Daily Plan not found', 404);
 
-    if (role !== "ADMIN" && role !== "SUPER_ADMIN") {
+    if (role !== 'ADMIN' && role !== 'SUPER_ADMIN') {
       const isParent = plan.booking.userId === userId;
       const isNanny  = plan.booking.nanny?.userId === userId;
       if (!isParent && !isNanny)
-        throw new AppError("You do not have permission to view this plan", 403);
+        throw new AppError('You do not have permission to view this plan', 403);
     }
 
     return plan;
   }
 
   // ── generatePlan ────────────────────────────────────────────────────────────
-  // Called at 12 AM on the day the booking starts (by the cron job).
-  // childGoals is a direct relation on Booking.
+  // Called by the midnight cron for every CONFIRMED FULL_TIME booking that
+  // does not yet have an AI plan.  Creates the master DailyPlan record and
+  // immediately generates day-1 tasks.
 
   async generatePlan(bookingId: string) {
-    log.info("generatePlan called for booking: %s", bookingId);
+    log.info('generatePlan: %s', bookingId);
 
     const booking = await prisma.booking.findUnique({
       where:   { id: bookingId },
@@ -69,17 +71,14 @@ export class PlanService {
         childGoals: true,
         requestedDayWiseDailyPlan: {
           include: { requestedDailyPlan: true },
-          orderBy: { date: "desc" },
+          orderBy: { date: 'desc' },
         },
       },
     });
 
-    if (!booking)
-      throw new AppError("Booking not found", 404);
-    if (booking.aiPlanGenerated)
-      throw new AppError("AI plan already generated for this booking", 409);
-    if (!booking.childGoals.length)
-      throw new AppError("No ChildGoals found for this booking", 400);
+    if (!booking)                   throw new AppError('Booking not found', 404);
+    if (booking.aiPlanGenerated)    throw new AppError('AI plan already generated for this booking', 409);
+    if (!booking.childGoals.length) throw new AppError('No ChildGoals found for this booking', 400);
 
     const goals          = this.extractGoals(booking.childGoals);
     const child          = booking.children;
@@ -89,9 +88,9 @@ export class PlanService {
       (1000 * 60 * 60 * 24),
     );
 
-  const parentGoalPrompt = booking.childGoals
-    .map((g) => g.parentDescription)
-    .join(". ");
+    const parentGoalPrompt = booking.childGoals
+      .map((g) => g.parentDescription)
+      .join('. ');
 
     const aiPlan = await aiService.generatePlan({
       parentGoalPrompt,
@@ -114,24 +113,32 @@ export class PlanService {
         lastGeneratedDate:   new Date(),
       },
     });
-    log.info("DailyPlan saved: %s", dailyPlan.id);
+    log.info('DailyPlan saved: %s', dailyPlan.id);
 
-    await this.generateDailyTasks(bookingId);
+    // Only generate tasks immediately if the booking has already started.
+    // For future bookings the 5 AM job will generate day-1 tasks on the correct date.
+    if (booking.scheduledStartTime.getTime() <= Date.now()) {
+      await this.generateDailyTasks(bookingId);
+      log.info('generatePlan: booking already started — day-1 tasks generated');
+    } else {
+      log.info('generatePlan: booking starts in the future — day-1 tasks deferred to 5 AM job');
+    }
 
     await prisma.booking.update({
       where: { id: bookingId },
       data:  { aiPlanGenerated: true, aiPlanGeneratedAt: new Date() },
     });
 
-    log.info("generatePlan complete for booking: %s", bookingId);
+    log.info('generatePlan complete: %s', bookingId);
     return dailyPlan;
   }
 
   // ── generateDailyTasks ──────────────────────────────────────────────────────
-  // Called every morning by the cron job, and once inside generatePlan.
+  // Called every 5 AM (after assessYesterday) and once inside generatePlan.
+  // Blends parent's daily routine + goal-focused development tasks.
 
   async generateDailyTasks(bookingId: string) {
-    log.info("generateDailyTasks called for booking: %s", bookingId);
+    log.info('generateDailyTasks: %s', bookingId);
 
     const dailyPlan = await prisma.dailyPlan.findUnique({
       where:   { bookingId },
@@ -142,7 +149,7 @@ export class PlanService {
             childGoals: true,
             requestedDayWiseDailyPlan: {
               include: { requestedDailyPlan: true },
-              orderBy: { date: "desc" },
+              orderBy: { date: 'desc' },
             },
           },
         },
@@ -150,28 +157,22 @@ export class PlanService {
     });
 
     if (!dailyPlan)
-      throw new AppError(
-        "No DailyPlan found for this booking — run generatePlan first",
-        404,
-      );
+      throw new AppError('No DailyPlan found for this booking — run generatePlan first', 404);
 
     const booking        = dailyPlan.booking;
     const child          = booking.children;
     const childAgeMonths = ageInMonths(child.birthDate);
     const goals          = this.extractGoals(booking.childGoals);
 
-    // ── Which week of the booking we're in ───────────────────────────────────
     const daysSinceStart = Math.floor(
-      (Date.now() - booking.scheduledStartTime.getTime()) /
-      (1000 * 60 * 60 * 24),
+      (Date.now() - booking.scheduledStartTime.getTime()) / (1000 * 60 * 60 * 24),
     );
     const currentWeek = Math.min(Math.floor(daysSinceStart / 7) + 1, 5);
 
-    // ── Today midnight UTC ────────────────────────────────────────────────────
     const todayMidnight = new Date();
     todayMidnight.setUTCHours(0, 0, 0, 0);
 
-    // ── Pick parent's requested routine for today, fall back to latest ────────
+    // Pick parent's requested routine for today; fall back to latest
     const dayWisePlans  = booking.requestedDayWiseDailyPlan;
     const todaysDayWise = dayWisePlans.find((d) => {
       const d0 = new Date(d.date);
@@ -185,31 +186,30 @@ export class PlanService {
         (p) => p.additionalNotes as { time: string; task: string }[],
       ) ?? [];
 
-    // ── Yesterday's summary for AI context ───────────────────────────────────
-    const previousTaskSummary = await this.buildPreviousDaySummary(dailyPlan.id);
+    // Previous day summary + score (null on day 1)
+    const { summary: previousTaskSummary, dayScore: yesterdayDayScore } =
+      await this.buildPreviousDaySummary(dailyPlan.id);
 
-    const weeklyFocusAreas = dailyPlan.weeklyFocusAreas as {
-      week: number;
-      focus: string;
-    }[];
+    const weeklyFocusAreas = dailyPlan.weeklyFocusAreas as { week: number; focus: string }[];
 
     const parentGoalPrompt = booking.childGoals
-    .map((g) => `${g.name}: ${g.parentDescription}`)
-    .join(". ");
+      .map((g) => `${g.name}: ${g.parentDescription}`)
+      .join('. ');
 
     const aiTasks = await aiService.generateDailyTasks({
       parentGoalPrompt,
       childAgeMonths,
       childGender:            child.gender,
-      overallStrategy:        dailyPlan.overallStrategy ?? "",
+      overallStrategy:        dailyPlan.overallStrategy ?? '',
       weeklyFocusAreas,
       currentWeek,
       goals,
       previousTaskSummary,
+      yesterdayDayScore,
       parentRequestedRoutine,
     });
 
-    // ── forDate stored as noon UTC — avoids IST/UTC midnight bleed ───────────
+    // Store tasks at noon UTC to avoid IST/UTC midnight bleed
     const forDate = new Date(Date.UTC(
       todayMidnight.getUTCFullYear(),
       todayMidnight.getUTCMonth(),
@@ -217,7 +217,7 @@ export class PlanService {
       12, 0, 0, 0,
     ));
 
-    // ── Delete existing tasks for today (idempotent) ──────────────────────────
+    // Idempotent: delete existing tasks for today before recreating
     const todayEnd = new Date(todayMidnight.getTime() + 86400000 - 1);
     await prisma.planTask.deleteMany({
       where: {
@@ -227,7 +227,7 @@ export class PlanService {
     });
 
     const savedTasks = await Promise.all(
-      aiTasks.map((t: any) =>
+      aiTasks.map((t) =>
         prisma.planTask.create({
           data: {
             plan:              { connect: { id: dailyPlan.id } },
@@ -246,7 +246,7 @@ export class PlanService {
             skipIf:            t.skipIf      || null,
             ifTooEasy:         t.ifTooEasy   || null,
             ifTooHard:         t.ifTooHard   || null,
-            status:            "PENDING",
+            status:            'PENDING',
           },
         }),
       ),
@@ -257,29 +257,23 @@ export class PlanService {
       data:  { lastGeneratedDate: new Date() },
     });
 
-    log.info(
-      "%d tasks generated for booking %s (week %d)",
-      savedTasks.length,
-      bookingId,
-      currentWeek,
-    );
+    log.info('%d tasks generated for booking %s (week %d)', savedTasks.length, bookingId, currentWeek);
     return savedTasks;
   }
 
   // ── assessYesterday ─────────────────────────────────────────────────────────
-  // Called by cron BEFORE generateDailyTasks.
-  // Reads yesterday's PlanTask[] + TaskLog[] → writes ChildDevelopmentLog.
-  // Uses (prisma as any) until schema changes are applied + prisma generate run.
+  // Called by the morning cron BEFORE generateDailyTasks.
+  // Reads yesterday's PlanTask[] + TaskLog[] → writes ChildDevelopmentLog records
+  // → updates ChildGoal completion → updates DailyPlan.dayScore
+  // → merges category stats into Children.developmentSummary.
 
   async assessYesterday(bookingId: string): Promise<void> {
-    log.info("assessYesterday called for booking: %s", bookingId);
+    log.info('assessYesterday: %s', bookingId);
 
     const dailyPlan = await prisma.dailyPlan.findUnique({
       where:   { bookingId },
       include: {
-        booking: {
-          include: { children: true, childGoals: true },
-        },
+        booking: { include: { children: true, childGoals: true } },
       },
     });
 
@@ -293,6 +287,15 @@ export class PlanService {
     yesterday.setUTCHours(0, 0, 0, 0);
     const yesterdayEnd = new Date(yesterday.getTime() + 86400000 - 1);
 
+    // Idempotency guard: skip if we already assessed this child yesterday
+    const alreadyAssessed = await prisma.childDevelopmentLog.findFirst({
+      where: { childId: child.id, loggedAt: { gte: yesterday, lte: yesterdayEnd } },
+    });
+    if (alreadyAssessed) {
+      log.info('assessYesterday: already done for child %s on %s — skipping', child.id, yesterday.toISOString().split('T')[0]);
+      return;
+    }
+
     const tasks = await prisma.planTask.findMany({
       where: {
         planId:  dailyPlan.id,
@@ -302,10 +305,11 @@ export class PlanService {
     });
 
     if (!tasks.length) {
-      log.info("No tasks for yesterday — skipping assessment for booking: %s", bookingId);
+      log.info('assessYesterday: no tasks yesterday for booking %s — skipping', bookingId);
       return;
     }
 
+    // Group tasks by category
     const byCategory: Record<string, typeof tasks> = {};
     for (const task of tasks) {
       if (!byCategory[task.category]) byCategory[task.category] = [];
@@ -313,24 +317,19 @@ export class PlanService {
     }
 
     const daysSinceStart = Math.floor(
-      (yesterday.getTime() - booking.scheduledStartTime.getTime()) /
-      (1000 * 60 * 60 * 24),
+      (yesterday.getTime() - booking.scheduledStartTime.getTime()) / (1000 * 60 * 60 * 24),
     );
     const weekNumber = Math.min(Math.floor(daysSinceStart / 7) + 1, 5);
 
-    const developmentSummary: Record<string, {
-      progressPct: number;
-      summary:     string;
-      lastUpdated: string;
-    }> = {};
+    const developmentSummary: Record<string, { progressPct: number; summary: string; lastUpdated: string }> = {};
 
     for (const [category, categoryTasks] of Object.entries(byCategory)) {
       const total     = categoryTasks.length;
-      const completed = categoryTasks.filter((t) => t.status === "COMPLETED").length;
-      const skipped   = categoryTasks.filter((t) => t.status === "SKIPPED").length;
+      const completed = categoryTasks.filter((t) => t.status === 'COMPLETED').length;
+      const skipped   = categoryTasks.filter((t) => t.status === 'SKIPPED').length;
 
       const completionPcts = categoryTasks
-        .filter((t) => t.log?.completionPct)
+        .filter((t) => t.log?.completionPct !== undefined && t.log.completionPct !== null)
         .map((t) => t.log!.completionPct);
       const avgCompletionPct = completionPcts.length
         ? Math.round(completionPcts.reduce((a, b) => a + b, 0) / completionPcts.length)
@@ -358,23 +357,20 @@ export class PlanService {
         skipped > 0   ? `${skipped} skipped`                : null,
         avgEngagement ? `avg engagement: ${avgEngagement}/5` : null,
         avgMood       ? `avg mood: ${avgMood}/5`             : null,
-      ].filter(Boolean).join(", ");
+      ].filter(Boolean).join(', ');
 
       const aiSummary =
-        progressPct >= 80
-          ? `Strong performance in ${category.toLowerCase()} activities today.`
-          : progressPct >= 50
-          ? `Moderate progress in ${category.toLowerCase()} — some tasks need revisiting.`
-          : `Challenging day for ${category.toLowerCase()} — consider reducing difficulty.`;
+        progressPct >= 80 ? `Strong performance in ${category.toLowerCase()} activities today.`
+        : progressPct >= 50 ? `Moderate progress in ${category.toLowerCase()} — some tasks need revisiting.`
+        : `Challenging day for ${category.toLowerCase()} — consider reducing difficulty.`;
 
       const categoryGoals = booking.childGoals.filter((g) => g.category === category);
 
-      // Uses (prisma as any) until ChildDevelopmentLog schema is applied
-      await (prisma as any).childDevelopmentLog.create({
+      await prisma.childDevelopmentLog.create({
         data: {
           child:           { connect: { id: child.id } },
           ...(categoryGoals[0] ? { goal: { connect: { id: categoryGoals[0].id } } } : {}),
-          category,
+          category:        category as GoalCategory,
           weekNumber,
           progressPct,
           milestoneReached,
@@ -390,10 +386,11 @@ export class PlanService {
         },
       });
 
+      // Update individual goal completion + milestone progression
       for (const goal of categoryGoals) {
         const goalTasks     = categoryTasks.filter((t) => t.goalId === goal.id);
         if (!goalTasks.length) continue;
-        const goalCompleted = goalTasks.filter((t) => t.status === "COMPLETED").length;
+        const goalCompleted = goalTasks.filter((t) => t.status === 'COMPLETED').length;
         const goalPct       = Math.round((goalCompleted / goalTasks.length) * 100);
         const newWeek       = goalPct >= 70
           ? Math.min(goal.currentMilestoneWeek + 1, 4)
@@ -408,10 +405,25 @@ export class PlanService {
       developmentSummary[category] = {
         progressPct,
         summary:     aiSummary,
-        lastUpdated: yesterday.toISOString().split("T")[0],
+        lastUpdated: yesterday.toISOString().split('T')[0],
       };
     }
 
+    // Compute overall dayScore from all goal-related tasks that were logged
+    const goalTasksLogged = tasks.filter((t) => t.goalId && t.log !== null);
+    const dayScore = goalTasksLogged.length > 0
+      ? Math.round(
+          goalTasksLogged.reduce((sum, t) => sum + (t.log!.completionPct || 0), 0) /
+          goalTasksLogged.length,
+        )
+      : 0;
+
+    await prisma.dailyPlan.update({
+      where: { id: dailyPlan.id },
+      data:  { dayScore, dayScoreAt: new Date() },
+    });
+
+    // Merge into Children.developmentSummary (keyed by category)
     const existingChild = await prisma.children.findUnique({
       where:  { id: child.id },
       select: { developmentSummary: true },
@@ -425,11 +437,81 @@ export class PlanService {
     });
 
     log.info(
-      "assessYesterday complete for booking %s — %d categories, week %d",
-      bookingId,
-      Object.keys(byCategory).length,
-      weekNumber,
+      'assessYesterday complete: booking %s — %d categories, week %d, dayScore %d',
+      bookingId, Object.keys(byCategory).length, weekNumber, dayScore,
     );
+  }
+
+  // ── generateMonthlySummary ──────────────────────────────────────────────────
+  // Called by the monthly cron on the 1st of each month.
+  // Aggregates ChildDevelopmentLog for the previous month → AI narrative
+  // → stored in Children.developmentSummary under key "YYYY-MM".
+
+  async generateMonthlySummary(childId: string, year: number, month: number): Promise<void> {
+    const monthStart = new Date(Date.UTC(year, month - 1, 1));
+    const monthEnd   = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    const monthKey   = `${year}-${String(month).padStart(2, '0')}`;
+
+    log.info('generateMonthlySummary: child %s, month %s', childId, monthKey);
+
+    const child = await prisma.children.findUnique({
+      where:   { id: childId },
+      include: {
+        developmentLogs: {
+          where: { loggedAt: { gte: monthStart, lte: monthEnd } },
+        },
+        childGoals: true,
+      },
+    });
+
+    if (!child || !child.developmentLogs.length) {
+      log.info('generateMonthlySummary: no development logs for child %s in %s — skipping', childId, monthKey);
+      return;
+    }
+
+    // Aggregate by category
+    const categoryMap = new Map<string, { progressSum: number; total: number; completed: number; count: number }>();
+    for (const entry of child.developmentLogs) {
+      const prev = categoryMap.get(entry.category) ?? { progressSum: 0, total: 0, completed: 0, count: 0 };
+      categoryMap.set(entry.category, {
+        progressSum: prev.progressSum + entry.progressPct,
+        total:       prev.total       + entry.totalTasks,
+        completed:   prev.completed   + entry.completedTasks,
+        count:       prev.count       + 1,
+      });
+    }
+
+    const categoryStats = Array.from(categoryMap.entries()).map(([category, data]) => ({
+      category,
+      avgProgress:    Math.round(data.progressSum / data.count),
+      totalTasks:     data.total,
+      completedTasks: data.completed,
+    }));
+
+    const childAgeMonths = ageInMonths(child.birthDate);
+
+    const aiSummary = await aiService.generateMonthlySummary({
+      childAgeMonths,
+      childGender: child.gender,
+      month:       monthKey,
+      categoryStats,
+      goals: child.childGoals.map((g) => ({
+        name:          g.name,
+        category:      g.category,
+        completionPct: g.completionPct,
+      })),
+    });
+
+    // Merge into existing developmentSummary — monthly key wins
+    const existing = (child.developmentSummary ?? {}) as Record<string, unknown>;
+    existing[monthKey] = { ...aiSummary, generatedAt: new Date().toISOString() };
+
+    await prisma.children.update({
+      where: { id: childId },
+      data:  { developmentSummary: existing as unknown as Prisma.InputJsonValue },
+    });
+
+    log.info('generateMonthlySummary done: child %s, month %s', childId, monthKey);
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
@@ -456,7 +538,10 @@ export class PlanService {
     }));
   }
 
-  private async buildPreviousDaySummary(planId: string): Promise<string> {
+  // Returns the text summary AND the computed dayScore (null if no goal tasks logged).
+  private async buildPreviousDaySummary(
+    planId: string,
+  ): Promise<{ summary: string; dayScore: number | null }> {
     const yesterday = new Date();
     yesterday.setUTCDate(yesterday.getUTCDate() - 1);
     yesterday.setUTCHours(0, 0, 0, 0);
@@ -470,18 +555,31 @@ export class PlanService {
       include: { log: true, goal: true },
     });
 
-    if (!tasks.length) return "No tasks were scheduled yesterday.";
+    if (!tasks.length) {
+      return { summary: 'No tasks were scheduled yesterday.', dayScore: null };
+    }
 
-    return tasks.map((t) => {
+    // Compute dayScore from goal tasks that have been logged
+    const goalTasksLogged = tasks.filter((t) => t.goalId && t.log !== null);
+    const dayScore = goalTasksLogged.length > 0
+      ? Math.round(
+          goalTasksLogged.reduce((sum, t) => sum + (t.log!.completionPct || 0), 0) /
+          goalTasksLogged.length,
+        )
+      : null;
+
+    const summary = tasks.map((t) => {
       const status = t.log?.completionPct
         ? `completed ${t.log.completionPct}%`
-        : t.status === "SKIPPED"
-        ? "skipped"
-        : "not logged";
-      const mood = t.log?.moodRating       ? `, mood ${t.log.moodRating}/5`             : "";
-      const eng  = t.log?.engagementRating ? `, engagement ${t.log.engagementRating}/5` : "";
-      const note = t.log?.nannyNote        ? `. Nanny note: "${t.log.nannyNote}"`        : "";
+        : t.status === 'SKIPPED'
+        ? 'skipped'
+        : 'not logged';
+      const mood = t.log?.moodRating       ? `, mood ${t.log.moodRating}/5`             : '';
+      const eng  = t.log?.engagementRating ? `, engagement ${t.log.engagementRating}/5` : '';
+      const note = t.log?.nannyNote        ? `. Nanny note: "${t.log.nannyNote}"`        : '';
       return `- "${t.title}" (${t.category}): ${status}${mood}${eng}${note}`;
-    }).join("\n");
+    }).join('\n');
+
+    return { summary, dayScore };
   }
 }

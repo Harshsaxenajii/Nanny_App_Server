@@ -5,9 +5,10 @@
  * Takes structured input, returns structured output.
  * No DB access — that is plan.service.ts's job.
  *
- * Exposed methods:
- *   generatePlan(input)       — called at 12 AM on booking start day
- *   generateDailyTasks(input) — called every morning by the cron job
+ * Methods:
+ *   generatePlan(input)           — called once per booking; creates master strategy
+ *   generateDailyTasks(input)     — called every morning; blends routine + goal tasks
+ *   generateMonthlySummary(input) — called 1st of each month; parent-facing report
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -16,7 +17,7 @@ import { AppError }            from '../utils/AppError';
 
 const log = createLogger('ai');
 
-// ─── Types (consumed by plan.service.ts) ─────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface GoalContext {
   id:                string;
@@ -45,7 +46,7 @@ export interface AiDailyPlan {
 }
 
 export interface GenerateDailyTasksInput {
-  parentGoalPrompt:       string;                           // FIX: restored — critical context
+  parentGoalPrompt:       string;
   childAgeMonths:         number;
   childGender:            string;
   overallStrategy:        string;
@@ -53,11 +54,12 @@ export interface GenerateDailyTasksInput {
   currentWeek:            number;
   goals:                  GoalContext[];
   previousTaskSummary:    string;
-  parentRequestedRoutine: { time: string; task: string }[]; // FIX: added — parent's routine
+  yesterdayDayScore:      number | null;  // 0-100 avg completion of goal tasks; null on day 1
+  parentRequestedRoutine: { time: string; task: string }[];
 }
 
 export interface AiTask {
-  goalId:            string;
+  goalId:            string | null;  // null for ROUTINE tasks that have no goal link
   title:             string;
   category:          'COGNITIVE' | 'PHYSICAL' | 'SOCIAL' | 'EMOTIONAL' | 'CREATIVE' | 'ROUTINE';
   durationMinutes:   number;
@@ -72,10 +74,34 @@ export interface AiTask {
   ifTooHard:         string;
 }
 
-interface RawAiTask extends Omit<AiTask, 'goalId'> {
-  goalIndex: number;
+export interface GenerateMonthlyInput {
+  childAgeMonths: number;
+  childGender:    string;
+  month:          string;  // "YYYY-MM"
+  categoryStats:  {
+    category:       string;
+    avgProgress:    number;
+    totalTasks:     number;
+    completedTasks: number;
+  }[];
+  goals: {
+    name:          string;
+    category:      string;
+    completionPct: number;
+  }[];
 }
 
+export interface AiMonthlySummary {
+  narrative:        string;
+  overallScore:     number;
+  categoryInsights: Record<string, string>;
+  recommendations:  string[];
+}
+
+// Internal types for raw AI JSON shapes
+interface RawAiTask extends Omit<AiTask, 'goalId'> {
+  goalIndex: number;  // -1 = ROUTINE task with no goal link
+}
 interface RawPlanResponse  { dailyPlan: AiDailyPlan; }
 interface RawTasksResponse { tasks: RawAiTask[]; }
 
@@ -92,10 +118,10 @@ export class AiService {
   }
 
   // ── generatePlan ────────────────────────────────────────────────────────────
-  // Called once at 12 AM on the day the booking starts.
+  // Called once per booking (by midnight cron) to build the master strategy.
 
   async generatePlan(input: GeneratePlanInput): Promise<AiDailyPlan> {
-    log.info('Generating master plan (child age: %d months, %d days)', input.childAgeMonths, input.bookingDays);
+    log.info('generatePlan: child age %d months, %d days', input.childAgeMonths, input.bookingDays);
 
     const weeksCount = Math.ceil(input.bookingDays / 7);
 
@@ -128,47 +154,59 @@ ${this.formatGoals(input.goals)}
 
 Rules:
 - weeklyFocusAreas must have exactly ${weeksCount} entries (one per week).
-- restWindows should be time ranges like "12:30 PM - 1:30 PM".
-- overallStrategy should be 2-3 sentences describing the core approach.
-- totalPlannedMinutes is the total structured activity per day (120-180 recommended).
+- restWindows: time ranges like "12:30 PM - 1:30 PM".
+- overallStrategy: 2-3 sentences describing the core developmental approach.
+- totalPlannedMinutes: total structured goal-activity time per day (120-180 recommended).
 
 Return only valid JSON.
     `.trim();
 
     const raw    = await this.callGemini(prompt);
     const parsed = this.parseJson<RawPlanResponse>(raw, 'generatePlan');
-
     this.validatePlan(parsed.dailyPlan);
     return parsed.dailyPlan;
   }
 
   // ── generateDailyTasks ──────────────────────────────────────────────────────
-  // Called every morning by the cron job.
-  // Uses yesterday's TaskLog + parent's requested routine to adapt tasks.
+  // Called every morning.  Blends parent's daily routine with goal-focused tasks.
+  // ROUTINE tasks use goalIndex: -1 (no goal link).
+  // GOAL tasks use goalIndex 0..N-1 (mapped to real ChildGoal.id after parsing).
 
   async generateDailyTasks(input: GenerateDailyTasksInput): Promise<AiTask[]> {
-    log.info('Generating daily tasks (week %d, child age: %d months)', input.currentWeek, input.childAgeMonths);
+    log.info('generateDailyTasks: week %d, age %d months', input.currentWeek, input.childAgeMonths);
 
     const weekFocus = input.weeklyFocusAreas.find((w) => w.week === input.currentWeek);
 
-    // FIX: build routine section properly — was a dead comment before
     const routineSection = input.parentRequestedRoutine.length
-      ? `Parent's requested routine for today (weave goal tasks around this):\n` +
+      ? `Parent's daily routine (include each slot as a ROUTINE task, goalIndex: -1):\n` +
         input.parentRequestedRoutine.map((r) => `  ${r.time}: ${r.task}`).join('\n')
-      : `Parent's requested routine: not specified — use your best judgement for the day's structure.`;
+      : `Parent's routine: not specified — add sensible caregiving slots (bath, meals, nap) as ROUTINE tasks.`;
+
+    const scoreSection = input.yesterdayDayScore !== null
+      ? `Yesterday's goal-task score: ${input.yesterdayDayScore}/100 — ` +
+        (input.yesterdayDayScore >= 75
+          ? 'child performed well; maintain or slightly increase difficulty.'
+          : input.yesterdayDayScore >= 50
+          ? 'moderate performance; keep similar difficulty.'
+          : 'child found tasks hard; reduce difficulty and simplify steps.')
+      : 'First day — no performance data yet. Start with MEDIUM difficulty.';
 
     const prompt = `
 You are an expert early childhood development planner for a professional nanny care platform in India.
-You generate a daily activity schedule for a trained nanny to execute.
+Generate a full daily schedule that blends routine caregiving with goal-focused development activities.
 
-Rules:
-- Total structured activity: 120-180 minutes spread across the day.
-- Vary categories — never schedule two consecutive tasks of the same category.
-- Tasks must be ordered chronologically by scheduledTime.
-- Each task must map to exactly one goal via goalIndex (0-based index into goals array).
-- Respect the parent's requested routine where possible — weave goal tasks around it.
+Task types:
+- ROUTINE tasks (goalIndex: -1, category: "ROUTINE"): Caregiving — bath, meals, nap, outdoor walk, storytime.
+  Include ALL parent-requested routine slots as-is. Add any obvious caregiving slots not listed.
+- GOAL tasks (goalIndex: 0..N-1, category: any except ROUTINE): Development activities mapped to a specific goal.
+  Generate 4-6 goal tasks woven around the routine.
+
+Scheduling rules:
+- Order all tasks chronologically by scheduledTime.
+- Total duration of GOAL tasks only: 120-180 minutes.
+- Never place two consecutive GOAL tasks of the same category.
+- ${scoreSection}
 - materials, successIndicators, skipIf, ifTooEasy, ifTooHard must be specific and actionable.
-- Adapt difficulty based on yesterday's performance — if child struggled, reduce difficulty. If too easy, increase.
 
 Your output must be a single valid JSON object. No markdown, no backticks, no explanation.
 Schema:
@@ -190,25 +228,22 @@ Schema:
   }]
 }
 
-Parent's overall goal for their child:
-"${input.parentGoalPrompt}"
+Parent's overall goal: "${input.parentGoalPrompt}"
 
 Child info:
 - Age: ${input.childAgeMonths} months
 - Gender: ${input.childGender}
 
-Overall strategy for this booking:
-"${input.overallStrategy}"
+Overall strategy: "${input.overallStrategy}"
 
-Week ${input.currentWeek} focus:
-"${weekFocus?.focus ?? 'Continue building on previous week'}"
+Week ${input.currentWeek} focus: "${weekFocus?.focus ?? 'Continue building on previous week'}"
 
 ${routineSection}
 
 Yesterday's task summary (adapt today based on this):
 ${input.previousTaskSummary}
 
-Goals (reference by goalIndex in tasks):
+Goals (reference by goalIndex for GOAL tasks):
 ${this.formatGoals(input.goals)}
 
 Return only valid JSON.
@@ -221,14 +256,18 @@ Return only valid JSON.
       throw new AppError('AI returned no tasks', 500);
     }
 
-    // Resolve goalIndex → real ChildGoal.id
+    // Resolve goalIndex → real ChildGoal.id  (goalIndex < 0 or out-of-range → null)
     return parsed.tasks.map((t) => {
-      const goal = input.goals[t.goalIndex];
-      if (!goal) {
-        log.warn('Task "%s" has invalid goalIndex %d — goal link will be null', t.title, t.goalIndex);
+      const goal = (t.goalIndex >= 0 && t.goalIndex < input.goals.length)
+        ? input.goals[t.goalIndex]
+        : null;
+
+      if (t.goalIndex >= 0 && !goal) {
+        log.warn('Task "%s" has invalid goalIndex %d — goal link set to null', t.title, t.goalIndex);
       }
+
       return {
-        goalId:            goal?.id            ?? '',
+        goalId:            goal?.id ?? null,
         title:             t.title,
         category:          t.category,
         durationMinutes:   t.durationMinutes,
@@ -245,6 +284,65 @@ Return only valid JSON.
     });
   }
 
+  // ── generateMonthlySummary ──────────────────────────────────────────────────
+  // Called on 1st of each month (by monthly cron) to produce a parent-facing report.
+
+  async generateMonthlySummary(input: GenerateMonthlyInput): Promise<AiMonthlySummary> {
+    log.info('generateMonthlySummary: month %s', input.month);
+
+    const categoryLines = input.categoryStats.length
+      ? input.categoryStats
+          .map((c) =>
+            `  ${c.category}: ${c.avgProgress}% avg progress` +
+            ` (${c.completedTasks}/${c.totalTasks} tasks completed)`,
+          )
+          .join('\n')
+      : '  No activity data recorded.';
+
+    const goalLines = input.goals.length
+      ? input.goals
+          .map((g) => `  ${g.name} (${g.category}): ${g.completionPct}% complete`)
+          .join('\n')
+      : '  No goals set.';
+
+    const prompt = `
+You are a child development specialist writing a monthly progress report for parents on a nanny care platform in India.
+Be warm, encouraging, and use simple parent-friendly language.
+
+Your output must be a single valid JSON object. No markdown, no backticks, no explanation.
+Schema:
+{
+  "narrative": string,
+  "overallScore": number,
+  "categoryInsights": { "<CATEGORY_NAME>": string },
+  "recommendations": string[]
+}
+
+Child info:
+- Age: ${input.childAgeMonths} months
+- Gender: ${input.childGender}
+- Month: ${input.month}
+
+Category performance this month:
+${categoryLines}
+
+Goal progress:
+${goalLines}
+
+Rules:
+- narrative: 3-4 warm, encouraging sentences summarising the month for parents.
+- overallScore: 0-100, weighted average of category progress percentages.
+- categoryInsights: one concise, parent-friendly sentence per category that had activity.
+- recommendations: 3-5 specific, actionable suggestions for next month.
+
+Return only valid JSON.
+    `.trim();
+
+    const raw    = await this.callGemini(prompt);
+    const parsed = this.parseJson<AiMonthlySummary>(raw, 'generateMonthlySummary');
+    return parsed;
+  }
+
   // ── Private helpers ─────────────────────────────────────────────────────────
 
   private async callGemini(prompt: string): Promise<string> {
@@ -254,7 +352,6 @@ Return only valid JSON.
 
     if (!raw) throw new AppError('Gemini returned an empty response', 500);
 
-    // Strip markdown fences Gemini adds despite instructions
     return raw
       .replace(/^```json\s*/i, '')
       .replace(/^```\s*/i,     '')

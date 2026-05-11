@@ -10,7 +10,7 @@
 
 import { Router, Request, Response, NextFunction } from "express";
 import { PlanService }                             from "../services/plan.service";
-import { runMidnightPlanJob, runMorningTaskJob }   from "../jobs/dailyPlan.job";
+import { runMidnightPlanJob, runMorningTaskJob, runMonthlySummaryJob } from "../jobs/dailyPlan.job";
 import { auth, roles }                             from "../middlewares/index";
 import { ok }                                      from "../utils/response";
 
@@ -80,6 +80,19 @@ router.post(
     try {
       await runMorningTaskJob();
       res.json(ok(null, "Morning task job executed"));
+    } catch (e) { next(e); }
+  },
+);
+
+// ── Manually trigger monthly summary job (testing only) ──────────────────────
+// Summarises the PREVIOUS month for all children with development logs
+router.post(
+  "/cron/monthly",
+  roles("ADMIN", "SUPER_ADMIN"),
+  async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+      await runMonthlySummaryJob();
+      res.json(ok(null, "Monthly summary job executed"));
     } catch (e) { next(e); }
   },
 );

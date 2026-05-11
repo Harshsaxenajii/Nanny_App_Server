@@ -771,6 +771,8 @@ model DailyPlan {
   restWindows         String[]       @default([])
   rawAiResponse       Json
   lastGeneratedDate   DateTime?
+  dayScore            Int?           // 0-100: avg completionPct of goal tasks from last assessed day
+  dayScoreAt          DateTime?      // when dayScore was last recomputed
   generatedAt         DateTime       @default(now())
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
