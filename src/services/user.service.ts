@@ -452,11 +452,21 @@ export class UserService {
     });
   }
 
-
   async getMyPayments(userId: string) {
     await findUserOrFail(userId);
     return prisma.payment.findMany({
       where: {
+        userId: userId,
+      },
+    });
+  }
+
+  async reportBug(userId: string, body: { title: string; description: string }) {
+    await findUserOrFail(userId);
+    return prisma.reportBug.create({
+      data: {
+        description: body.description,
+        issueName: body.title,
         userId: userId,
       },
     });

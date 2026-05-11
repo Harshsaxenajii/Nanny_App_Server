@@ -389,5 +389,42 @@ export function registerEventHandlers(): void {
     }
   });
 
+  // ── EXTENSION_PAYMENT_CAPTURED ─────────────────────────────────────────────
+  // Confirms the extension in DB, extends the booking end date, seeds attendance,
+  // then notifies the user.
+  // ──────────────────────────────────────────────────────────────────────────
+  bus.on(
+    Events.EXTENSION_PAYMENT_CAPTURED,
+    async ({ bookingId, extensionId, paymentId }) => {
+      try {
+        await book.handleExtensionPaymentCaptured(extensionId, paymentId);
+
+        const booking = await prisma.booking.findUnique({
+          where: { id: bookingId },
+        });
+        if (!booking) return;
+
+        await notif.create(
+          booking.userId,
+          NotificationType.PAYMENT_SUCCESS,
+          "Booking Extended! ✅",
+          "Your extension payment is confirmed. Your nanny's schedule has been updated.",
+          { bookingId, extensionId },
+        );
+
+        await sendNormalNotification(
+          booking.userId,
+          "Booking Extended! ✅",
+          "Your extension payment is confirmed. Your nanny's schedule has been updated.",
+          { type: "BOOKING_EXTENDED", bookingId, screen: "bookings" },
+        );
+      } catch (err: any) {
+        log.error("EXTENSION_PAYMENT_CAPTURED handler error", {
+          error: err.message,
+        });
+      }
+    },
+  );
+
   log.info("Event handlers registered");
 }

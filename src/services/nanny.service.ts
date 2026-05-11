@@ -189,7 +189,7 @@ export class NannyService {
         userId: nannyId,
       },
     });
-    console.log(nannyDetails)
+    // console.log(nannyDetails)
     if (!nannyDetails) throw new AppError("Nanny not found", 404);
     return nannyDetails;
   }

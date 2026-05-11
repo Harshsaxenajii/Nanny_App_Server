@@ -31,7 +31,8 @@ import { goalRouter } from "./routes/goal.routes";
 import { planRouter } from "./routes/plan.routes";
 import { registerDailyPlanJob } from "./jobs/dailyPlan.job";
 
-const serviceAccount = require("./etc/secrets/service-account.json");
+// const serviceAccount = require("/etc/secrets/service-account.json");
+const serviceAccount = require("./service-account.json");
 
 const data = admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -82,7 +83,7 @@ io.on("connection", (socket) => {
         type: data.type || "TEXT",
         createdAt: new Date().toISOString(),
       });
-    }
+    },
   );
 
   socket.on("disconnect", () => {
@@ -106,7 +107,7 @@ app.use(
       statusCode: 429,
     },
     skip: () => config.isDev,
-  })
+  }),
 );
 
 // Razorpay webhook needs raw body for HMAC verification — must be before express.json()
@@ -125,9 +126,9 @@ app.get("/health", async (_req, res) => {
     include: {
       childGoals: true,
       dailyPlan: {
-        include:{
-          tasks:true
-        }
+        include: {
+          tasks: true,
+        },
       },
       // requestedDayWiseDailyPlan:true,
     },
@@ -203,7 +204,7 @@ async function start() {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("unhandledRejection", (reason) =>
-    log.error("Unhandled rejection", { reason })
+    log.error("Unhandled rejection", { reason }),
   );
   process.on("uncaughtException", (err) => {
     log.error("Uncaught exception", { error: err.message });
