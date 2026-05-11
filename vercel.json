@@ -1,0 +1,34 @@
+{
+  "version": 2,
+
+  "buildCommand": "npm run build",
+
+  "builds": [
+    {
+      "src": "dist/index.js",
+      "use": "@vercel/node"
+    }
+  ],
+
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "dist/index.js"
+    }
+  ],
+
+  "crons": [
+    {
+      "path": "/api/v1/plan/cron/midnight",
+      "schedule": "0 18 * * *"
+    },
+    {
+      "path": "/api/v1/plan/cron/morning",
+      "schedule": "30 23 * * *"
+    },
+    {
+      "path": "/api/v1/plan/cron/monthly",
+      "schedule": "0 20 1 * *"
+    }
+  ]
+}

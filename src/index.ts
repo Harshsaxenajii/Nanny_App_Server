@@ -30,6 +30,7 @@ import * as admin from "firebase-admin";
 import { goalRouter } from "./routes/goal.routes";
 import { planRouter } from "./routes/plan.routes";
 import { registerDailyPlanJob } from "./jobs/dailyPlan.job";
+const log = createLogger("app");
 
 // Load Firebase service account from env var (production) or local file (dev)
 function loadFirebaseCredential(): admin.credential.Credential {
@@ -38,7 +39,9 @@ function loadFirebaseCredential(): admin.credential.Credential {
       const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
       return admin.credential.cert(sa);
     } catch {
-      log.error("FIREBASE_SERVICE_ACCOUNT env var is not valid JSON — Firebase disabled");
+      log.error(
+        "FIREBASE_SERVICE_ACCOUNT env var is not valid JSON — Firebase disabled",
+      );
       return admin.credential.applicationDefault();
     }
   }
@@ -47,14 +50,15 @@ function loadFirebaseCredential(): admin.credential.Credential {
     const sa = require("../service-account.json");
     return admin.credential.cert(sa);
   } catch {
-    log.warn("service-account.json not found and FIREBASE_SERVICE_ACCOUNT not set — push notifications disabled");
+    log.warn(
+      "service-account.json not found and FIREBASE_SERVICE_ACCOUNT not set — push notifications disabled",
+    );
     return admin.credential.applicationDefault();
   }
 }
 
 admin.initializeApp({ credential: loadFirebaseCredential() });
 
-const log = createLogger("app");
 const app = express();
 const httpServer = createServer(app);
 
@@ -190,7 +194,9 @@ async function start() {
     registerDailyPlanJob();
     log.info("Internal cron jobs registered");
   } else {
-    log.info("USE_EXTERNAL_CRON=true — skipping internal cron registration (using external scheduler)");
+    log.info(
+      "USE_EXTERNAL_CRON=true — skipping internal cron registration (using external scheduler)",
+    );
   }
 
   httpServer.listen(config.port, () => {
@@ -219,4 +225,11 @@ async function start() {
   });
 }
 
-start();
+// Run the HTTP server only when this file is executed directly (local dev / Render).
+// When imported by Vercel's serverless runtime, require.main !== module, so
+// start() is skipped and the exported `app` is used as the request handler.
+if (require.main === module) {
+  start();
+}
+
+export default app;
