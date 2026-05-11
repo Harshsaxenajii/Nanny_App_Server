@@ -178,8 +178,8 @@ model User {
   role                         UserRole  @default(USER)
   platform                     String?
   lastLoginAt                  DateTime?
-  preferredNannyGender         Gender?
-  languagesSpoken              String[]
+  preferredNannyGender         Gender    @default(FEMALE)
+  languagesSpoken              String[]  @default(["English"])
   notificationsSms             Boolean   @default(true)
   notificationsPush            Boolean   @default(true)
   emergencyContactName         String?
@@ -548,7 +548,7 @@ model Payment {
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
-  booking   Booking          @relation(fields: [bookingId], references: [id])
+  booking   Booking           @relation(fields: [bookingId], references: [id])
   extension BookingExtension?
 
   @@map("payments")

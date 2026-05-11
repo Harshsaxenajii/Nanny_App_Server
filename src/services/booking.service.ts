@@ -210,6 +210,8 @@ async function seedAttendanceRecords(
           nannyId: booking.nannyId!,
           userId: booking.userId,
           scheduledDate,
+          clockInAt: null,
+          clockOutAt: null,
           status: AttendanceStatus.PENDING,
         },
         update: {},
@@ -251,14 +253,14 @@ export class BookingService {
           "For cross-midnight sessions the end time must be on the following calendar day.",
         400,
       );
-    console.log("tag 1");
+    // console.log("tag 1");
     if (!isRange && sessionMs > MAX_SESSION_HOURS * 3_600_000)
       throw new AppError(
         `Session cannot exceed ${MAX_SESSION_HOURS} hours.`,
         400,
       );
 
-    console.log("tag 2");
+    // console.log("tag 2");
     // ── 2. Validate child ────────────────────────────────────────────────────
     const child = await prisma.children.findUnique({
       where: { id: body.childrenId },
@@ -270,7 +272,7 @@ export class BookingService {
     // ── 3. Validate nanny (if specified) ────────────────────────────────────
     let nannyId: string | null = null;
     let nanny: any = null;
-    console.log("tag 3");
+    // console.log("tag 3");
 
     if (body.nannyId) {
       nanny = await prisma.nanny.findUnique({ where: { id: body.nannyId } });
@@ -313,7 +315,7 @@ export class BookingService {
     if (body.couponCode && !validateCoupon(body.couponCode).valid)
       throw new AppError("Invalid or expired coupon code", 400);
 
-    console.log("tag 4");
+    // console.log("tag 4");
     // ── 5. Goals fee ─────────────────────────────────────────────────────────
     const selectedGoals: any[] = Array.isArray(body.selectedGoals)
       ? body.selectedGoals
@@ -346,7 +348,7 @@ export class BookingService {
       }
     }
 
-    console.log("tag 4", body.lunch);
+    // console.log("tag 4", body.lunch);
     // ── 7. Calculate pricing ─────────────────────────────────────────────────
     const pricing = nanny
       ? calcPricing({
@@ -363,7 +365,7 @@ export class BookingService {
         })
       : null;
 
-    console.log("you pricies", calcPricing);
+    // console.log("you pricies", calcPricing);
 
     // ── 8. Build address snapshot ────────────────────────────────────────────
     const addr = body.address;
@@ -598,7 +600,7 @@ export class BookingService {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
-    console.log("going to capture the payment");
+    // console.log("going to capture the payment");
 
     const environment = process.env.NODE_ENV || "OFFICESETUP";
 
@@ -625,7 +627,7 @@ export class BookingService {
       },
     });
 
-    console.log("payment done going for add reserve slots");
+    // console.log("payment done going for add reserve slots");
     // Block this time slot on the nanny's profile so the explore route hides her
 
     if (booking.nannyId) {
@@ -635,7 +637,14 @@ export class BookingService {
         booking.scheduledStartTime,
         booking.scheduledEndTime,
       );
-      console.log("reserve slots added going for create attendance", data);
+      // console.log("reserve slots added going for create attendance", data);
+    }
+
+    if (booking.nannyId && booking.serviceType === "FULL_TIME") {
+      await prisma.nanny.update({
+        where: { id: booking.nannyId },
+        data: { isActive: false },
+      });
     }
 
     // Pre-seed attendance rows for every working day
@@ -779,7 +788,12 @@ export class BookingService {
         );
       await prisma.attendanceRecord.update({
         where: { id: existing.id },
-        data: { clockInAt: now, status: attendanceStatus, lateMinutes },
+        data: {
+          clockInAt: now,
+          clockOutAt: null,
+          status: attendanceStatus,
+          lateMinutes,
+        },
       });
     } else {
       await prisma.attendanceRecord.create({
@@ -789,6 +803,7 @@ export class BookingService {
           userId: booking.userId,
           scheduledDate: today,
           clockInAt: now,
+          clockOutAt: null,
           status: attendanceStatus,
           lateMinutes,
         },
@@ -1171,6 +1186,80 @@ export class BookingService {
     );
     return updated;
   }
+  
+  async updateReqestedTask(
+    nannyUserId: string,
+    bookingId: string,
+    taskId: string,
+    body: { status: "COMPLETED" | "SKIPPED"; notes?: string },
+  ) {
+    const nanny = await prisma.nanny.findUnique({
+      where: { userId: nannyUserId },
+    });
+    if (!nanny) throw new AppError("Nanny profile not found", 404);
+
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
+    if (!booking) throw new AppError("Booking not found", 404);
+    if (booking.nannyId !== nanny.id)
+      throw new AppError("You are not assigned to this booking", 403);
+    if (booking.status !== "IN_PROGRESS")
+      throw new AppError(
+        "Tasks can only be updated when the booking is in progress",
+        400,
+      );
+
+    const task = await prisma.requestedDailyPlan.findUnique({
+      where: { id: taskId },
+    });
+    if (!task) throw new AppError(`Task ${taskId} not found`, 404);
+    
+    const VALID_STATUSES = ["COMPLETED", "SKIPPED"];
+    if (!VALID_STATUSES.includes(body.status))
+      throw new AppError(
+        `Invalid status "${body.status}". Must be one of: ${VALID_STATUSES.join(", ")}`,
+        400,
+      );
+
+    const updated = await prisma.requestedDailyPlan.update({
+      where: { id: taskId },
+      data: { status: body.status as any, updatedAt: new Date() },
+    });
+
+    if (body.notes) {
+      await prisma.taskLog.upsert({
+        where: { taskId },
+        create: {
+          taskId,
+          nannyId: nanny.id,
+          childrenId: booking.childrenId,
+          nannyNote: body.notes,
+          completedAt: body.status === "COMPLETED" ? new Date() : null,
+        },
+        update: {
+          nannyNote: body.notes,
+          ...(body.status === "COMPLETED" ? { completedAt: new Date() } : {}),
+        },
+      });
+    }
+
+    await prisma.booking.update({
+      where: { id: bookingId },
+      data: {
+        timeline: appendTimeline(
+          booking.timeline,
+          BookingStatus.IN_PROGRESS,
+          `Task "${task.name}" marked ${body.status} by nanny`,
+        ) as any,
+      },
+    });
+
+    log.info(
+      `[updatePlanTask] taskId=${taskId} bookingId=${bookingId} status=${body.status}`,
+    );
+    return updated;
+  }
 
   // ── GET /api/v1/bookings ─────────────────────────────────────────────────
   async getMyBookings(userId: string, role: string, query: any) {
@@ -1283,7 +1372,13 @@ export class BookingService {
         },
         childGoals: true,
         dailyPlan: true,
-        requestedDayWiseDailyPlan: { include: { requestedDailyPlan: true } },
+        requestedDayWiseDailyPlan: {
+          orderBy: { createdAt: "desc" }, // Sort by newest first
+          take: 1, // Only fetch the top 1
+          include: {
+            requestedDailyPlan: true
+          },
+        },
         attendanceRecords: { orderBy: { scheduledDate: "asc" } },
       },
     });
@@ -1454,6 +1549,7 @@ export class BookingService {
   async getActiveShift(
     userId: string,
   ): Promise<{ bookingId: string; booking: any } | null> {
+    // console.log("getting active shift for user", userId);
     const nanny = await prisma.nanny.findUnique({ where: { userId } });
     if (!nanny) return null;
 
@@ -1468,22 +1564,30 @@ export class BookingService {
         userId: true,
       },
     });
+    // console.log("found IN_PROGRESS booking for user", userId, booking);
     if (!booking) return null;
 
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    // console.log(
+    //   "checking attendance for booking",
+    //   booking.id,
+    //   "nannyId",
+    //   nanny.id,
+    // );
 
-    const todayAttendance = await prisma.attendanceRecord.findFirst({
+    // "Active" means clocked in but not yet clocked out — date-agnostic so it
+    // works for all booking types (HOURLY, PART_TIME, FULL_TIME) and is immune
+    // to UTC/IST midnight boundaries.
+    const activeAttendance = await prisma.attendanceRecord.findFirst({
       where: {
         bookingId: booking.id,
         nannyId: nanny.id,
-        scheduledDate: { gte: today, lt: tomorrow },
+        clockInAt: { not: null },
+        clockOutAt: null,
       },
     });
-
-    if (!todayAttendance?.clockInAt || todayAttendance.clockOutAt) return null;
+    // console.log("attendance record for booking", booking.id, activeAttendance);
+    if (!activeAttendance) return null;
+    // console.log("active shift found for user", userId, "bookingId", booking.id);
     return { bookingId: booking.id, booking };
   }
 
@@ -1507,45 +1611,49 @@ export class BookingService {
       completionPct: number | null;
     }[];
   } | null> {
-    const booking = await prisma.booking.findFirst({
-      where: {
-        userId,
-        status: {
-          in: [
-            BookingStatus.IN_PROGRESS,
-            BookingStatus.CONFIRMED,
-            BookingStatus.NANNY_ASSIGNED,
-          ],
+    // Prefer IN_PROGRESS so an old CONFIRMED booking doesn't shadow an active one.
+    const bookingSelect = {
+      id: true,
+      nanny: { select: { id: true, name: true, profilePhoto: true } },
+    } as const;
+
+    const booking =
+      (await prisma.booking.findFirst({
+        where: { userId, status: BookingStatus.IN_PROGRESS },
+        select: bookingSelect,
+        orderBy: { updatedAt: "desc" },
+      })) ??
+      (await prisma.booking.findFirst({
+        where: {
+          userId,
+          status: {
+            in: [BookingStatus.CONFIRMED, BookingStatus.NANNY_ASSIGNED],
+          },
         },
-      },
-      select: {
-        id: true,
-        nanny: { select: { id: true, name: true, profilePhoto: true } },
-      },
-    });
+        select: bookingSelect,
+        orderBy: { updatedAt: "desc" },
+      }));
 
     if (!booking || !booking.nanny) return null;
 
-    // Check nanny is clocked in and not yet clocked out today
-    const utcToday = new Date();
-    utcToday.setUTCHours(0, 0, 0, 0);
-    const utcTomorrow = new Date(utcToday);
-    utcTomorrow.setUTCDate(utcTomorrow.getUTCDate() + 1);
-
+    // "Active" means clocked in but not yet clocked out — date-agnostic so it
+    // works for HOURLY / PART_TIME / FULL_TIME and across UTC/IST midnight.
     const attendance = await prisma.attendanceRecord.findFirst({
       where: {
         bookingId: booking.id,
         nannyId: booking.nanny.id,
-        scheduledDate: { gte: utcToday, lt: utcTomorrow },
+        clockInAt: { not: null },
+        clockOutAt: null,
       },
     });
 
-    if (!attendance?.clockInAt || attendance.clockOutAt) return null;
+    if (!attendance) return null;
 
-    // IST-aware window for today's tasks
-    // IST = UTC+5h30m → "today in IST" starts at [UTC midnight − 5h30m]
+    // IST-aware window for today's AI-generated tasks
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-    const todayISTStartUTC = new Date(utcToday.getTime() - IST_OFFSET_MS);
+    const utcNow = new Date();
+    utcNow.setUTCHours(0, 0, 0, 0);
+    const todayISTStartUTC = new Date(utcNow.getTime() - IST_OFFSET_MS);
     const todayISTEndUTC = new Date(
       todayISTStartUTC.getTime() + 24 * 60 * 60 * 1000,
     );
@@ -1577,14 +1685,14 @@ export class BookingService {
 
     log.info(
       `[getUserLiveStatus] userId=${userId} bookingId=${booking.id}` +
-        ` tasks=${mapped.length} clockedIn=${attendance.clockInAt.toISOString()}`,
+        ` tasks=${mapped.length} clockedIn=${attendance.clockInAt!.toISOString()}`,
     );
 
     return {
       bookingId: booking.id,
       nannyName: booking.nanny.name,
       nannyPhoto: booking.nanny.profilePhoto,
-      clockedInAt: attendance.clockInAt,
+      clockedInAt: attendance.clockInAt!,
       totalTasks: mapped.length,
       completedTasks: mapped.filter((t) => t.status === "COMPLETED").length,
       pendingTasks: mapped.filter((t) => t.status === "PENDING").length,
@@ -1602,7 +1710,9 @@ export class BookingService {
     date: string,
     tasks: string[],
   ) {
-    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
     if (!booking) throw new AppError("Booking not found", 404);
     if (booking.userId !== userId)
       throw new AppError("You do not have access to this booking", 403);
@@ -1642,7 +1752,9 @@ export class BookingService {
     newEndDate: string,
     workingDays?: string[],
   ) {
-    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+    });
     if (!booking) throw new AppError("Booking not found", 404);
     if (booking.userId !== userId)
       throw new AppError("You do not have access to this booking", 403);
@@ -1662,7 +1774,10 @@ export class BookingService {
     const newEnd = new Date(newEndDate);
     if (isNaN(newEnd.getTime())) throw new AppError("Invalid newEndDate", 400);
     if (newEnd <= booking.scheduledEndTime)
-      throw new AppError("New end date must be after the current end date", 400);
+      throw new AppError(
+        "New end date must be after the current end date",
+        400,
+      );
 
     const pending = await prisma.bookingExtension.findFirst({
       where: { bookingId, status: "PENDING_PAYMENT" },
@@ -1698,7 +1813,8 @@ export class BookingService {
     const pricing = calcPricing({
       serviceType: booking.serviceType,
       hourlyRate: nanny.hourlyRate,
-      dailyRate: nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null,
+      dailyRate:
+        nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null,
       shiftStart: booking.scheduledStartTime,
       shiftEnd: booking.scheduledEndTime,
       workingDays: extraDays,
@@ -1796,6 +1912,8 @@ export class BookingService {
                 nannyId: booking.nannyId!,
                 userId: booking.userId,
                 scheduledDate,
+                clockInAt: null,
+                clockOutAt: null,
                 status: AttendanceStatus.PENDING,
               },
               update: {},

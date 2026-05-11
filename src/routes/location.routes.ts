@@ -4,6 +4,9 @@ import { auth, roles, validate } from "../middlewares/index";
 import { S } from "../validators/index";
 import { ok } from "../utils/response";
 import { prisma } from "../config/prisma";
+import { createLogger } from "../utils/logger";
+
+const routeLog = createLogger("location-route");
 
 const router = Router();
 const service = new LocationService();
@@ -51,13 +54,20 @@ router.get(
       const {
         childId,
         careType,
-        startDate,   // booking period start — used for reserved slot overlap check
-        endDate,     // booking period end
+        startDate, startTime,   // accept either name from the client
+        endDate,   endTime,
         preferredGender,
         languages,
         requirements,
         addressId,
       } = req.query;
+      // console.log("Received explore query:", req.query);
+
+      const reqStartDate = (startTime || startDate) as string | undefined;
+      const reqEndDate   = (endDate   || endTime)   as string | undefined;
+
+      routeLog.info(`[/explore] raw query: ${JSON.stringify(req.query)}`);
+      routeLog.info(`[/explore] resolved: reqStartDate=${reqStartDate} reqEndDate=${reqEndDate}`);
 
       // Get address coordinates
       let lat: number | undefined;
@@ -76,6 +86,7 @@ router.get(
         lat = user.addresses[0].lat;
         lng = user.addresses[0].lng;
       }
+      routeLog.info(`[/explore] user address: lat=${lat} lng=${lng}`);
 
       // Get child's age group
       let childAgeGroup: string | undefined;
@@ -92,14 +103,15 @@ router.get(
           else childAgeGroup = "6+ years";
         }
       }
+      routeLog.info(`[/explore] childAgeGroup=${childAgeGroup}`);
 
       const matches = await service.exploreNannies({
         lat,
         lng,
         radius: 15,
         careType: careType as string,
-        reqStartDate: startDate as string,
-        reqEndDate: endDate as string,
+        reqStartDate,
+        reqEndDate,
         preferredGender: preferredGender as string,
         languages: parseStringArray(languages),
         requirements: parseStringArray(requirements),
@@ -121,21 +133,30 @@ router.get(
       const {
         childId,
         careType,
-        startDate,
-        endDate,
+        startDate, startTime,   // accept either name from the client
+        endDate,   endTime,
         preferredGender,
         languages,
         requirements,
+        addressId,
       } = req.query;
 
-      // Get address coordinates
+      const reqStartDate = (startTime || startDate) as string | undefined;
+      const reqEndDate   = (endDate   || endTime)   as string | undefined;
+
+      routeLog.info(`[/explore/count] raw query: ${JSON.stringify(req.query)}`);
+      routeLog.info(`[/explore/count] resolved: reqStartDate=${reqStartDate} reqEndDate=${reqEndDate}`);
+
+      // Get address coordinates — mirror explore route so both use the same address
       let lat: number | undefined;
       let lng: number | undefined;
 
       const user = await prisma.user.findUnique({
         where: { id: String(userId) },
         select: {
-          addresses: { where: { isDefault: true } },
+          addresses: {
+            where: addressId ? { id: String(addressId) } : { isDefault: true },
+          },
         },
       });
 
@@ -143,6 +164,7 @@ router.get(
         lat = user.addresses[0].lat;
         lng = user.addresses[0].lng;
       }
+      routeLog.info(`[/explore/count] user address: lat=${lat} lng=${lng}`);
 
       // Get child's age group
       let childAgeGroup: string | undefined;
@@ -159,14 +181,15 @@ router.get(
           else childAgeGroup = "6+ years";
         }
       }
+      routeLog.info(`[/explore/count] childAgeGroup=${childAgeGroup}`);
 
       const count = await service.countAvailableNannies({
         lat,
         lng,
         radius: 15,
         careType: careType as string,
-        reqStartDate: startDate as string,
-        reqEndDate: endDate as string,
+        reqStartDate,
+        reqEndDate,
         preferredGender: preferredGender as string,
         languages: parseStringArray(languages),
         requirements: parseStringArray(requirements),

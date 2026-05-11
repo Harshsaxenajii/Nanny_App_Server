@@ -163,6 +163,29 @@ router.patch(
   },
 );
 
+router.patch(
+  "/:id/requested-plan/task/:taskId",
+  roles("NANNY"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await service.updateReqestedTask(
+        req.user!.userId,
+        req.params.id,
+        req.params.taskId,
+        req.body,
+      );
+      res.json({
+        success: true,
+        message: "Task updated",
+        data: result,
+        statusCode: 200,
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
 // ── PATCH /api/v1/bookings/:id/accept ────────────────────────────────────────
 // Nanny accepts a booking after payment is confirmed (CONFIRMED → NANNY_ASSIGNED)
 router.patch(
