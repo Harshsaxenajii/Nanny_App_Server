@@ -274,6 +274,27 @@ export class NannyService {
     });
   }
 
+  /* ── GET /api/v1/nannies/:id/busy-slots ────────────────────────────── */
+  async getBusySlots(nannyId: string) {
+    const nanny = await prisma.nanny.findUnique({
+      where: { id: nannyId },
+      select: { id: true, reservedSlot: true },
+    });
+    if (!nanny) throw new AppError("Nanny not found", 404);
+
+    const slots = (nanny.reservedSlot as any[]) ?? [];
+    return {
+      nannyId: nanny.id,
+      total: slots.length,
+      busySlots: slots.map((s: any) => ({
+        bookingId: s.bookingId ?? null,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        isBlock: s.isBlock ?? false,
+      })),
+    };
+  }
+
   /* ── GET /api/v1/nannies/me/bookings ────────────────────────────────── */
   async getMyBookings(userId: string, query: any) {
     const nanny = await findNannyByUserOrFail(userId);

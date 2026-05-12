@@ -42,6 +42,21 @@ const CANCELLED_STATUSES = [
   BookingStatus.COMPLETED,
 ];
 
+const UPCOMING_STATUSES = [
+  BookingStatus.PENDING_NANNY_CONFIRMATION,
+  BookingStatus.PENDING_PAYMENT,
+  BookingStatus.CONFIRMED,
+  BookingStatus.NANNY_ASSIGNED,
+  BookingStatus.IN_PROGRESS,
+];
+
+const PAST_STATUSES = [
+  BookingStatus.COMPLETED,
+  BookingStatus.CANCELLED_BY_USER,
+  BookingStatus.CANCELLED_BY_NANNY,
+  BookingStatus.CANCELLED_BY_ADMIN,
+];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SMALL UTILITIES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1274,41 +1289,43 @@ export class BookingService {
 
   // ── GET /api/v1/bookings ─────────────────────────────────────────────────
   async getMyBookings(userId: string, role: string, query: any) {
-    const { page, limit, skip } = paginate(query);
-
     if (!["USER", "NANNY", "ADMIN", "SUPER_ADMIN"].includes(role))
       throw new AppError("You do not have permission to view bookings", 403);
 
-    let nannyId: string | undefined;
-    if (role === "NANNY") {
-      const nanny = await prisma.nanny.findUnique({ where: { userId } });
-      if (!nanny) throw new AppError("Nanny profile not found.", 404);
-      nannyId = nanny.id;
+    const { page, limit, skip } = paginate(query);
+    const where: any = { userId };
+
+    // ── Tab filter (primary) ──────────────────────────────────────────────
+    if (query.tab === "upcoming") {
+      where.status = { in: UPCOMING_STATUSES };
+    } else if (query.tab === "past") {
+      where.status = { in: PAST_STATUSES };
     }
 
-    const baseWhere: any =
-      role === "NANNY" && nannyId ? { nannyId } : { userId };
-
+    // ── Granular status override (optional, e.g. ?status=CONFIRMED) ───────
     if (query.status) {
-      const valid: BookingStatus[] = [
-        BookingStatus.PENDING_PAYMENT,
-        BookingStatus.CONFIRMED,
-        BookingStatus.NANNY_ASSIGNED,
-        BookingStatus.IN_PROGRESS,
-        BookingStatus.COMPLETED,
-        BookingStatus.CANCELLED_BY_USER,
-        BookingStatus.CANCELLED_BY_NANNY,
-        BookingStatus.CANCELLED_BY_ADMIN,
-      ];
-      if (!valid.includes(query.status as BookingStatus))
-        throw new AppError(`Invalid status '${query.status}'`, 400);
-      baseWhere.status = query.status as BookingStatus;
+      where.status = query.status as BookingStatus;
     }
+
+    // ── Service type filter ───────────────────────────────────────────────
+    if (query.serviceType) {
+      where.serviceType = query.serviceType;
+    }
+
+    // ── Date range filter ─────────────────────────────────────────────────
+    if (query.from || query.to) {
+      where.scheduledStartTime = {};
+      if (query.from) where.scheduledStartTime.gte = new Date(query.from);
+      if (query.to) where.scheduledStartTime.lte = new Date(query.to);
+    }
+
+    // Upcoming: nearest first. Past / no tab: most recent first.
+    const orderBy =
+      query.tab === "upcoming"
+        ? { scheduledStartTime: "asc" as const }
+        : { scheduledStartTime: "desc" as const };
 
     const include = {
-      user: {
-        select: { id: true, name: true, mobile: true, profilePhoto: true },
-      },
       nanny: {
         select: {
           id: true,
@@ -1318,41 +1335,17 @@ export class BookingService {
           rating: true,
         },
       },
+      children: {
+        select: { id: true, name: true, gender: true, birthDate: true },
+      },
     };
 
-    if (query.status) {
-      const [bookings, total] = await Promise.all([
-        prisma.booking.findMany({
-          where: baseWhere,
-          skip,
-          take: limit,
-          orderBy: { createdAt: "desc" },
-          include,
-        }),
-        prisma.booking.count({ where: baseWhere }),
-      ]);
-      return paginatedResult(bookings, total, page, limit);
-    }
-
-    // Pin IN_PROGRESS bookings to the top, paginate the rest
-    const [inProgress, others, total] = await Promise.all([
-      prisma.booking.findMany({
-        where: { ...baseWhere, status: BookingStatus.IN_PROGRESS },
-        orderBy: { updatedAt: "desc" },
-        include,
-      }),
-      prisma.booking.findMany({
-        where: { ...baseWhere, status: { not: BookingStatus.IN_PROGRESS } },
-        skip,
-        take: limit,
-        orderBy: { createdAt: "desc" },
-        include,
-      }),
-      prisma.booking.count({ where: baseWhere }),
+    const [bookings, total] = await Promise.all([
+      prisma.booking.findMany({ where, skip, take: limit, orderBy, include }),
+      prisma.booking.count({ where }),
     ]);
 
-    const merged = [...inProgress, ...others].slice(skip, skip + limit);
-    return paginatedResult(merged, total, page, limit);
+    return paginatedResult(bookings, total, page, limit);
   }
 
   // ── GET /api/v1/bookings/:id ─────────────────────────────────────────────
