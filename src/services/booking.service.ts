@@ -21,7 +21,6 @@ import {
 // Re-export for any callers that imported these from this module directly
 export { validateCoupon } from "../utils/pricing";
 
-
 const log = createLogger("booking");
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1212,7 +1211,7 @@ export class BookingService {
     );
     return updated;
   }
-  
+
   async updateReqestedTask(
     nannyUserId: string,
     bookingId: string,
@@ -1240,7 +1239,7 @@ export class BookingService {
       where: { id: taskId },
     });
     if (!task) throw new AppError(`Task ${taskId} not found`, 404);
-    
+
     const VALID_STATUSES = ["COMPLETED", "SKIPPED"];
     if (!VALID_STATUSES.includes(body.status))
       throw new AppError(
@@ -1380,10 +1379,28 @@ export class BookingService {
           orderBy: { createdAt: "desc" }, // Sort by newest first
           take: 1, // Only fetch the top 1
           include: {
-            requestedDailyPlan: true
+            requestedDailyPlan: true,
           },
         },
         attendanceRecords: { orderBy: { scheduledDate: "asc" } },
+        extensions: {
+          select: {
+            id: true,
+            bookingId: true,
+            status: true,
+            previousEndTime: true,
+            newEndTime: true,
+            extraDays: true,
+            workingDays: true,
+            baseAmount: true,
+            gstAmount: true,
+            totalAmount: true,
+            razorpayOrderId: true,
+            pricingDetails: true,
+            createdAt: true,
+          },
+          orderBy: { createdAt: "desc" },
+        },
       },
     });
     if (!booking) throw new AppError("Booking not found", 404);
@@ -1411,8 +1428,23 @@ export class BookingService {
         })
       : [];
 
+    // One actionable pending extension: unpaid and extends beyond the current
+    // booking end date. Everything else is confirmed history.
+    const pendingExtension =
+      booking.extensions.find(
+        (e) =>
+          e.status === "PENDING_PAYMENT" &&
+          new Date(e.newEndTime) > new Date(booking.scheduledEndTime),
+      ) ?? null;
+
+    const confirmedExtensions = booking.extensions.filter(
+      (e) => e.status === "CONFIRMED",
+    );
+
     return {
       ...booking,
+      extensions: confirmedExtensions,
+      pendingExtension,
       dailyPlan: booking.dailyPlan.map((p) =>
         p.id === plan?.id ? { ...p, tasks: todayTasks } : { ...p, tasks: [] },
       ),
@@ -1755,7 +1787,14 @@ export class BookingService {
     userId: string,
     newEndDate: string,
     workingDays?: string[],
+    updatedTasks?: string[],
+    updatedGoals?: any[],
+    lunch?: boolean,
+    specialInstructions?: string,
+    couponCode?: string,
   ) {
+
+
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
@@ -1783,14 +1822,9 @@ export class BookingService {
         400,
       );
 
-    const pending = await prisma.bookingExtension.findFirst({
+    const existingPending = await prisma.bookingExtension.findFirst({
       where: { bookingId, status: "PENDING_PAYMENT" },
     });
-    if (pending)
-      throw new AppError(
-        "A pending extension already exists for this booking",
-        409,
-      );
 
     const nanny = booking.nannyId
       ? await prisma.nanny.findUnique({ where: { id: booking.nannyId } })
@@ -1814,38 +1848,120 @@ export class BookingService {
     const extraDays =
       extraDates.length > 0 ? extraDates.length : DEFAULT_MONTHLY_WORKING_DAYS;
 
+    // Goals fee for pricing
+    const goalsFee = Array.isArray(updatedGoals)
+      ? updatedGoals.reduce((sum, g) => sum + (Number(g.pricePerMonth) || 0), 0)
+      : 0;
+
+    // Use the stored daily sessionHours so we price per-day correctly.
+    // booking.scheduledStartTime/EndTime span the entire booking period —
+    // passing them directly would make calcPricing see hundreds of hours.
+    const storedSessionHours: number =
+      (booking.pricingDetails as any)?.sessionHours ?? 9;
+    const fakeShiftStart = new Date(0);
+    const fakeShiftEnd = new Date(storedSessionHours * 3_600_000);
+
     const pricing = calcPricing({
       serviceType: booking.serviceType,
       hourlyRate: nanny.hourlyRate,
       dailyRate:
         nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null,
-      shiftStart: booking.scheduledStartTime,
-      shiftEnd: booking.scheduledEndTime,
+      shiftStart: fakeShiftStart,
+      shiftEnd: fakeShiftEnd,
       workingDays: extraDays,
+      couponCode: couponCode ?? undefined,
+      goalsFee,
+      lunch: lunch === true,
     });
 
-    const extension = await prisma.bookingExtension.create({
-      data: {
-        bookingId,
-        previousEndTime: booking.scheduledEndTime,
-        newEndTime: newEnd,
-        extraDays,
-        workingDays: extensionWorkingDays,
-        baseAmount: pricing.baseFee,
-        gstAmount: pricing.gst,
-        totalAmount: pricing.total,
-        status: "PENDING_PAYMENT",
-        pricingDetails: {
-          sessionHours: pricing.sessionHours,
-          workingDays: pricing.workingDays,
-          baseFee: pricing.baseFee,
-          platformFee: pricing.platformFee,
-          gst: pricing.gst,
-          total: pricing.total,
-          description: pricing.description,
-        },
+    const extensionData = {
+      previousEndTime: booking.scheduledEndTime,
+      newEndTime: newEnd,
+      extraDays,
+      workingDays: extensionWorkingDays,
+      baseAmount: pricing.baseFee,
+      gstAmount: pricing.gst,
+      totalAmount: pricing.total,
+      pricingDetails: {
+        sessionHours: pricing.sessionHours,
+        workingDays: pricing.workingDays,
+        baseFee: pricing.baseFee,
+        couponCode: pricing.couponCode,
+        couponLabel: pricing.couponLabel,
+        discount: pricing.discount,
+        discountedBase: pricing.discountedBase,
+        platformFee: pricing.platformFee,
+        gst: pricing.gst,
+        goalsFee: pricing.goalsFee,
+        lunchFee: pricing.lunchFee,
+        total: pricing.total,
+        description: pricing.description,
       },
+    };
+
+    // Build the updated requestedTasks array, preserving isDone state for
+    // tasks that already existed in the booking.
+    const bookingTaskUpdates: Record<string, any> = {};
+    if (Array.isArray(updatedTasks)) {
+      const existing: any[] = (booking.requestedTasks as any[]) ?? [];
+      const existingMap = new Map(existing.map((t) => [t.task, t]));
+      const newTasks = updatedTasks.map((task) =>
+        existingMap.has(task)
+          ? existingMap.get(task)
+          : { task, isDone: false, doneAt: null },
+      );
+      bookingTaskUpdates.requestedTasks = newTasks;
+    }
+
+    if (
+      typeof specialInstructions === "string" &&
+      specialInstructions.trim() !== ""
+    ) {
+      bookingTaskUpdates.specialInstructions = specialInstructions.trim();
+    }
+
+    // Upsert pattern: if a PENDING_PAYMENT extension already exists (which
+    // would collide on the paymentId unique-null constraint), update it with
+    // the new values. Otherwise create a fresh record.
+    const [extension] = await prisma.$transaction(async (tx) => {
+      const ext = existingPending
+        ? await tx.bookingExtension.update({
+            where: { id: existingPending.id },
+            data: extensionData,
+          })
+        : await tx.bookingExtension.create({
+            data: { bookingId, status: "PENDING_PAYMENT", ...extensionData },
+          });
+
+      if (Object.keys(bookingTaskUpdates).length > 0) {
+        await tx.booking.update({
+          where: { id: bookingId },
+          data: bookingTaskUpdates,
+        });
+      }
+
+      return [ext];
     });
+
+    // Replace child goals if the user sent an updated list
+    if (Array.isArray(updatedGoals) && updatedGoals.length > 0) {
+      await prisma.childGoal.deleteMany({ where: { bookingId } });
+      await Promise.all(
+        updatedGoals.map((g) =>
+          prisma.childGoal.create({
+            data: {
+              childId: booking.childrenId,
+              bookingId,
+              name: g.name,
+              category: g.category,
+              priority: g.priority ?? "MEDIUM",
+              parentDescription: g.parentDescription ?? "",
+              milestones: Array.isArray(g.milestones) ? g.milestones : [],
+            },
+          }),
+        ),
+      );
+    }
 
     log.info(
       `[extendBooking] bookingId=${bookingId} extensionId=${extension.id}` +

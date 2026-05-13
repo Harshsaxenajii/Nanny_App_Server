@@ -49,11 +49,17 @@ router.post(
   validate(S.extendBooking),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
+      console.log("payload in booking for extend: ",req.body)
       const result = await service.extendBooking(
         req.params.id,
         req.user!.userId,
         req.body.newEndDate,
         req.body.workingDays,
+        req.body.updatedTasks,
+        req.body.updatedGoals,
+        req.body.lunch,
+        req.body.specialInstructions,
+        req.body.couponCode,
       );
       res.status(201).json({
         success: true,

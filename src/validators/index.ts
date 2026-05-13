@@ -263,6 +263,24 @@ export const S = {
     workingDays: Joi.array()
       .items(Joi.string().valid("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"))
       .optional(),
+    updatedTasks: Joi.array().items(Joi.string()).optional(),
+    updatedGoals: Joi.array()
+      .items(
+        Joi.object({
+          goalId: Joi.string().optional(),
+          name: Joi.string().required(),
+          category: Joi.string().required(),
+          priority: Joi.string().valid("HIGH", "MEDIUM", "LOW").optional(),
+          parentDescription: Joi.string().optional().allow(""),
+          milestones: Joi.array().optional(),
+          pricePerMonth: Joi.number().min(0).optional(),
+        }),
+      )
+      .optional(),
+    lunch: Joi.boolean().optional(),
+    specialInstructions: Joi.string().max(500).optional().allow(""),
+    couponCode: Joi.string().optional().allow(""),
+    pricingEstimate: Joi.object().optional(),
   }),
 
   /* Payment */
