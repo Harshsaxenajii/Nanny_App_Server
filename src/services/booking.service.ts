@@ -1737,6 +1737,47 @@ export class BookingService {
     };
   }
 
+  // ── GET /api/v1/bookings/:id/tasks ──────────────────────────────────────
+  async getBookingTasks(bookingId: string, userId: string, role: string) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { userId: true, requestedTasks: true, childrenId: true, serviceType: true },
+    });
+    if (!booking) throw new AppError("Booking not found", 404);
+    const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(role);
+    if (!isAdmin && booking.userId !== userId)
+      throw new AppError("Access denied", 403);
+    return {
+      tasks: (booking.requestedTasks as any[]) ?? [],
+      childrenId: booking.childrenId,
+      serviceType: booking.serviceType,
+    };
+  }
+
+  // ── PATCH /api/v1/bookings/:id/tasks ─────────────────────────────────────
+  async updateBookingTasks(bookingId: string, userId: string, tasks: string[]) {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { userId: true, requestedTasks: true },
+    });
+    if (!booking) throw new AppError("Booking not found", 404);
+    if (booking.userId !== userId) throw new AppError("Access denied", 403);
+
+    const existing: any[] = (booking.requestedTasks as any[]) ?? [];
+    const existingMap = new Map(existing.map((t: any) => [t.task, t]));
+    const newTasks = tasks.map((task) =>
+      existingMap.has(task)
+        ? existingMap.get(task)
+        : { task, isDone: false, doneAt: null },
+    );
+
+    return prisma.booking.update({
+      where: { id: bookingId },
+      data: { requestedTasks: newTasks },
+      select: { id: true, requestedTasks: true },
+    });
+  }
+
   // ── POST /api/v1/bookings/:id/requested-plan ─────────────────────────────
   // Adds a new RequestedDayWiseDailyPlan with the tasks list for the given date.
   // Creates exactly one container record and one plan record (no per-day fan-out).
@@ -1822,8 +1863,11 @@ export class BookingService {
         400,
       );
 
-    const existingPending = await prisma.bookingExtension.findFirst({
-      where: { bookingId, status: "PENDING_PAYMENT" },
+    // Find any unpaid extension for this booking (paymentId=null is the field
+    // governed by the @@unique([bookingId, paymentId]) constraint — we must
+    // update rather than create to avoid a duplicate-key error).
+    const existingUnpaid = await prisma.bookingExtension.findFirst({
+      where: { bookingId, paymentId: null },
     });
 
     const nanny = booking.nannyId
@@ -1840,8 +1884,13 @@ export class BookingService {
         ? workingDays
         : (booking.workingDays as string[]);
 
+    // Extension period starts the day AFTER the current booking ends.
+    // scheduledEndTime itself is already covered by the active booking.
+    const extensionRangeStart = new Date(booking.scheduledEndTime);
+    extensionRangeStart.setUTCDate(extensionRangeStart.getUTCDate() + 1);
+
     const extraDates = getWorkingDates(
-      booking.scheduledEndTime,
+      extensionRangeStart,
       newEnd,
       extensionWorkingDays,
     );
@@ -1920,14 +1969,13 @@ export class BookingService {
       bookingTaskUpdates.specialInstructions = specialInstructions.trim();
     }
 
-    // Upsert pattern: if a PENDING_PAYMENT extension already exists (which
-    // would collide on the paymentId unique-null constraint), update it with
-    // the new values. Otherwise create a fresh record.
+    // Upsert: if an unpaid extension already exists for this booking, update it
+    // (avoids the @@unique([bookingId, paymentId]) collision on null paymentId).
     const [extension] = await prisma.$transaction(async (tx) => {
-      const ext = existingPending
+      const ext = existingUnpaid
         ? await tx.bookingExtension.update({
-            where: { id: existingPending.id },
-            data: extensionData,
+            where: { id: existingUnpaid.id },
+            data: { status: "PENDING_PAYMENT", ...extensionData },
           })
         : await tx.bookingExtension.create({
             data: { bookingId, status: "PENDING_PAYMENT", ...extensionData },
@@ -2010,10 +2058,13 @@ export class BookingService {
       );
     }
 
-    // Seed attendance records for the extended period
+    // Seed attendance records for the extended period.
+    // Start the day AFTER previousEndTime — that day belongs to the original booking.
     try {
+      const attStart = new Date(extension.previousEndTime);
+      attStart.setUTCDate(attStart.getUTCDate() + 1);
       const dates = getWorkingDates(
-        extension.previousEndTime,
+        attStart,
         extension.newEndTime,
         extension.workingDays as string[],
       );

@@ -296,6 +296,31 @@ router.patch(
   },
 );
 
+// ── GET /api/v1/bookings/:id/tasks ───────────────────────────────────────────
+router.get(
+  "/:id/tasks",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.json(ok(await service.getBookingTasks(req.params.id, req.user!.userId, req.user!.role)));
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+// ── PATCH /api/v1/bookings/:id/tasks ─────────────────────────────────────────
+router.patch(
+  "/:id/tasks",
+  roles("USER"),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.json(ok(await service.updateBookingTasks(req.params.id, req.user!.userId, req.body.tasks), "Tasks updated"));
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
 // ── GET /api/v1/bookings/:id/attendance ──────────────────────────────────────
 // Returns all attendance records + summary for a booking.
 // Accessible by: the parent (USER), the assigned nanny, or ADMIN / SUPER_ADMIN.

@@ -112,7 +112,8 @@ export class PaymentService {
         bookingId,
       };
     } catch (err: any) {
-      log.error("Razorpay order creation failed", { error: err.message });
+      const detail = err?.error?.description ?? err?.message ?? JSON.stringify(err);
+      log.error("Razorpay order creation failed", { error: detail });
       throw new AppError("Payment gateway error. Please try again.", 502);
     }
   }
@@ -208,7 +209,8 @@ export class PaymentService {
         bookingId: extension.bookingId,
       };
     } catch (err: any) {
-      log.error("Razorpay extension order creation failed", { error: err.message });
+      const detail = err?.error?.description ?? err?.message ?? JSON.stringify(err);
+      log.error("Razorpay extension order creation failed", { error: detail });
       throw new AppError("Payment gateway error. Please try again.", 502);
     }
   }
@@ -251,7 +253,6 @@ export class PaymentService {
 
     const payment = await prisma.payment.findUnique({
       where: { razorpayOrderId: body.razorpayOrderId },
-      include: { extension: true },
     });
     if (!payment)
       throw new AppError("Payment record not found for this order", 404);
@@ -266,12 +267,17 @@ export class PaymentService {
       },
     });
 
-    if (payment.type === "EXTENSION" && payment.extension) {
-      bus.emit(Events.EXTENSION_PAYMENT_CAPTURED, {
-        bookingId: payment.bookingId,
-        extensionId: payment.extension.id,
-        paymentId: body.razorpayPaymentId,
+    if (payment.type === "EXTENSION") {
+      const extension = await prisma.bookingExtension.findFirst({
+        where: { paymentId: payment.id },
       });
+      if (extension) {
+        bus.emit(Events.EXTENSION_PAYMENT_CAPTURED, {
+          bookingId: payment.bookingId,
+          extensionId: extension.id,
+          paymentId: body.razorpayPaymentId,
+        });
+      }
     } else {
       bus.emit(Events.PAYMENT_CAPTURED, {
         bookingId: payment.bookingId,

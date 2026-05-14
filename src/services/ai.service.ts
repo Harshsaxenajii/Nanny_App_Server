@@ -346,7 +346,7 @@ Return only valid JSON.
   // ── Private helpers ─────────────────────────────────────────────────────────
 
   private async callGemini(prompt: string): Promise<string> {
-    const model  = this.gemini.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
+    const model  = this.gemini.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
     const result = await model.generateContent(prompt);
     const raw    = result.response.text().trim();
 
