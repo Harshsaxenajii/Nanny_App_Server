@@ -339,6 +339,7 @@ export class NannyService {
         take: limit,
         orderBy,
         include: {
+          nannyPayment: true,
           user: {
             select: { id: true, name: true, mobile: true, profilePhoto: true },
           },
@@ -351,5 +352,162 @@ export class NannyService {
     ]);
 
     return paginatedResult(bookings, total, page, limit);
+  }
+
+  async getNannyDashboard(userId: string) {
+    const nanny = await findNannyByUserOrFail(userId);
+
+    const now = new Date();
+
+    // Week start (Monday 00:00)
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+    weekStart.setHours(0, 0, 0, 0);
+
+    // Today window
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date(now);
+    todayEnd.setHours(23, 59, 59, 999);
+
+    const [
+      pendingRequests,
+      upcomingShifts,
+      completedToday,
+      completedThisWeek,
+      completedJobsCount,
+      unreadCount,
+    ] = await Promise.all([
+      // Pending: nanny must accept/reject
+      prisma.booking.findMany({
+        where: {
+          nannyId: nanny.id,
+          status: BookingStatus.PENDING_NANNY_CONFIRMATION,
+        },
+        orderBy: { scheduledStartTime: "asc" },
+        take: 5,
+        include: {
+          user: {
+            select: { id: true, name: true, profilePhoto: true, mobile: true },
+          },
+          children: { select: { id: true, name: true, gender: true } },
+        },
+      }),
+      // Upcoming confirmed/in-progress shifts
+      prisma.booking.findMany({
+        where: {
+          nannyId: nanny.id,
+          status: {
+            in: [
+              BookingStatus.CONFIRMED,
+              BookingStatus.IN_PROGRESS,
+              BookingStatus.NANNY_ASSIGNED,
+            ] as any,
+          },
+          scheduledStartTime: { gte: now },
+        },
+        orderBy: { scheduledStartTime: "asc" },
+        take: 5,
+        include: {
+          user: { select: { id: true, name: true, profilePhoto: true } },
+          children: { select: { id: true, name: true, gender: true } },
+        },
+      }),
+      // Today's completed bookings (for earnings)
+      prisma.booking.findMany({
+        where: {
+          nannyId: nanny.id,
+          status: BookingStatus.COMPLETED,
+          actualEndTime: { gte: todayStart, lte: todayEnd },
+        },
+        select: { baseAmount: true },
+      }),
+      // This week's completed bookings
+      prisma.booking.findMany({
+        where: {
+          nannyId: nanny.id,
+          status: BookingStatus.COMPLETED,
+          actualEndTime: { gte: weekStart },
+        },
+        select: { baseAmount: true },
+      }),
+      // Total completed job count
+      prisma.booking.count({
+        where: { nannyId: nanny.id, status: BookingStatus.COMPLETED },
+      }),
+      // Unread notifications (via nanny's userId)
+      prisma.notification.count({
+        where: { userId: nanny.userId, isRead: false },
+      }),
+    ]);
+
+    const todayEarnings = completedToday.reduce(
+      (sum, b) => sum + (b.baseAmount ?? 0),
+      0,
+    );
+    const weekEarnings = completedThisWeek.reduce(
+      (sum, b) => sum + (b.baseAmount ?? 0),
+      0,
+    );
+
+    return {
+      pendingRequests,
+      upcomingShifts,
+      todayEarnings,
+      weekEarnings,
+      completedJobsCount,
+      hasUnreadNotifications: unreadCount > 0,
+      unreadNotificationCount: unreadCount,
+      isAvailable: nanny.isAvailable,
+      isOnline: nanny.isAvailable,
+      rating: nanny.rating,
+      totalReviews: nanny.totalReviews,
+    };
+  }
+
+  async getEarnings(userId: string, query: any) {
+    const nanny = await findNannyByUserOrFail(userId);
+
+    const { page, limit, skip } = paginate(query);
+    const where: any = { nannyId: nanny.id };
+    if (query.status) where.status = query.status;
+
+    const [payments, total, confirmedSum, settledSum] = await Promise.all([
+      prisma.nannyPayment.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+        include: {
+          booking: {
+            select: {
+              id: true,
+              serviceType: true,
+              scheduledStartTime: true,
+              scheduledEndTime: true,
+              children: { select: { name: true } },
+            },
+          },
+        },
+      }),
+      prisma.nannyPayment.count({ where }),
+      prisma.nannyPayment.aggregate({
+        where: { nannyId: nanny.id, status: "CONFIRMED" },
+        _sum: { totalAmount: true },
+      }),
+      prisma.nannyPayment.aggregate({
+        where: { nannyId: nanny.id, status: "SETTLED" },
+        _sum: { totalAmount: true },
+      }),
+    ]);
+
+    const base = paginatedResult(payments, total, page, limit);
+    return {
+      ...base,
+      summary: {
+        pendingBalance: confirmedSum._sum.totalAmount ?? 0,
+        totalSettled: settledSum._sum.totalAmount ?? 0,
+      },
+    };
   }
 }

@@ -3,6 +3,7 @@ import { AppError } from "../utils/AppError";
 import { createLogger } from "../utils/logger";
 import { bus, Events } from "../utils/eventBus";
 import { paginate, paginatedResult } from "../utils/response";
+import { haversineKm } from "../utils/haversine";
 // import { triggerAiPlanForBooking } from "./plan.service";
 import { isSubscriptionBooking } from "../utils/goalTemplates";
 import { AttendanceStatus, BookingStatus, NannyStatus } from "@prisma/client";
@@ -329,8 +330,15 @@ export class BookingService {
     }
 
     // ── 4. Validate coupon ───────────────────────────────────────────────────
-    if (body.couponCode && !validateCoupon(body.couponCode).valid)
-      throw new AppError("Invalid or expired coupon code", 400);
+    let resolvedCoupon: { discountPct: number; label: string } | undefined;
+    if (body.couponCode) {
+      const { CouponService } = await import("./coupon.service");
+      const couponSvc = new CouponService();
+      const result = await couponSvc.validateCode(body.couponCode);
+      if (!result.valid)
+        throw new AppError("Invalid or expired coupon code", 400);
+      resolvedCoupon = { discountPct: result.discountPct!, label: result.label! };
+    }
 
     // console.log("tag 4");
     // ── 5. Goals fee ─────────────────────────────────────────────────────────
@@ -377,6 +385,7 @@ export class BookingService {
           shiftEnd,
           workingDays: billingWorkingDays,
           couponCode: body.couponCode ?? undefined,
+          resolvedCoupon,
           goalsFee,
           lunch: body.lunch === true,
         })
@@ -664,6 +673,29 @@ export class BookingService {
       });
     }
 
+    // Create nanny earnings record
+    if (booking.nannyId) {
+      try {
+        const pricing = (booking.pricingDetails ?? {}) as Record<string, number>;
+        const baseAmount = booking.baseAmount ?? 0;
+        const goalsFee = (pricing.goalsFee ?? 0) * 0.5;
+        const lunchFee = pricing.lunchFee ?? 0;
+        const totalAmount = baseAmount + goalsFee + lunchFee;
+        await prisma.nannyPayment.create({
+          data: {
+            nannyId: booking.nannyId,
+            bookingId: booking.id,
+            baseAmount,
+            goalsFee,
+            lunchFee,
+            totalAmount,
+          },
+        });
+      } catch (e) {
+        log.error(`[handlePaymentCaptured] nannyPayment create failed bookingId=${bookingId}`, e);
+      }
+    }
+
     // Pre-seed attendance rows for every working day
     try {
       const { seeded } = await seedAttendanceRecords(bookingId);
@@ -737,7 +769,7 @@ export class BookingService {
   // Nanny clocks in.
   // Single-day: CONFIRMED → IN_PROGRESS
   // Range:      CONFIRMED | IN_PROGRESS → IN_PROGRESS (daily clock-in, multi-day)
-  async startBooking(bookingId: string, userId: string) {
+  async startBooking(bookingId: string, userId: string, nannyLat?: number, nannyLng?: number) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
@@ -768,6 +800,27 @@ export class BookingService {
     }
 
     const now = new Date();
+
+    // ── 30-minute early window check ───────────────────────────────────────
+    const scheduledMs = new Date(booking.scheduledStartTime).getTime();
+    const minsUntilStart = (scheduledMs - now.getTime()) / 60_000;
+    if (minsUntilStart > 30)
+      throw new AppError(
+        `You can only start the booking 30 minutes before the scheduled time. Please try again in ${Math.ceil(minsUntilStart - 30)} minute(s).`,
+        400,
+      );
+
+    // ── Geo-fence check (150 m) ─────────────────────────────────────────────
+    if (nannyLat !== undefined && nannyLng !== undefined &&
+        booking.addressLat !== null && booking.addressLng !== null) {
+      const distKm = haversineKm(nannyLat, nannyLng, booking.addressLat!, booking.addressLng!);
+      if (distKm > 0.15) {
+        throw new AppError(
+          `You are ${Math.round(distKm * 1000)}m away from the booking location. You must be within 150m to start the booking.`,
+          400,
+        );
+      }
+    }
     const today = new Date(now);
     today.setUTCHours(0, 0, 0, 0);
 
@@ -861,7 +914,7 @@ export class BookingService {
   // Nanny clocks out.
   // Single-day / final day of range  → COMPLETED  (removes reservedSlot)
   // Non-final day of range           → stays IN_PROGRESS (daily clock-out only)
-  async completeBooking(bookingId: string, userId: string) {
+  async completeBooking(bookingId: string, userId: string, nannyLat?: number, nannyLng?: number) {
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
     });
@@ -876,6 +929,18 @@ export class BookingService {
         `Cannot complete booking in status: ${booking.status}. Must be IN_PROGRESS.`,
         400,
       );
+
+    // ── Geo-fence check (150 m) ─────────────────────────────────────────────
+    if (nannyLat !== undefined && nannyLng !== undefined &&
+        booking.addressLat !== null && booking.addressLng !== null) {
+      const distKm = haversineKm(nannyLat, nannyLng, booking.addressLat!, booking.addressLng!);
+      if (distKm > 0.15) {
+        throw new AppError(
+          `You are ${Math.round(distKm * 1000)}m away from the booking location. You must be within 150m to end the shift.`,
+          400,
+        );
+      }
+    }
 
     const now = new Date();
     const isRange = isRangeType(booking.serviceType);
@@ -963,12 +1028,17 @@ export class BookingService {
       );
     }
 
+    const workedPct = expectedHrs > 0 ? Math.round((workedHrs / expectedHrs) * 100) : 100;
+
     return {
       booking: updatedBooking,
       attendance: {
         workedHours: +workedHrs.toFixed(2),
+        expectedHours: +expectedHrs.toFixed(2),
+        workedPct,
         status: finalAttStatus,
         isFinalDay,
+        isHalfDay,
       },
     };
   }
@@ -1128,7 +1198,7 @@ export class BookingService {
     nannyUserId: string,
     bookingId: string,
     taskId: string,
-    body: { status: "COMPLETED" | "SKIPPED"; notes?: string },
+    body: { status: "COMPLETED" | "SKIPPED"; notes?: string; nannyScore?: number },
   ) {
     const nanny = await prisma.nanny.findUnique({
       where: { userId: nannyUserId },
@@ -1165,23 +1235,37 @@ export class BookingService {
         400,
       );
 
+    const isGoalTask = !!task.goalId;
+
+    if (isGoalTask && body.nannyScore !== undefined) {
+      if (!Number.isInteger(body.nannyScore) || body.nannyScore < 1 || body.nannyScore > 5)
+        throw new AppError("nannyScore must be an integer between 1 and 5", 400);
+    }
+
     const updated = await prisma.planTask.update({
       where: { id: taskId },
-      data: { status: body.status as any, updatedAt: new Date() },
+      data: {
+        status: body.status as any,
+        ...(isGoalTask && body.nannyScore !== undefined
+          ? { nannyScore: body.nannyScore }
+          : {}),
+        updatedAt: new Date(),
+      },
     });
 
-    if (body.notes) {
+    // Always upsert TaskLog for goal tasks; for non-goal tasks only when notes provided
+    if (isGoalTask || body.notes) {
       await prisma.taskLog.upsert({
         where: { taskId },
         create: {
           taskId,
           nannyId: nanny.id,
           childrenId: booking.childrenId,
-          nannyNote: body.notes,
+          nannyNote: body.notes ?? null,
           completedAt: body.status === "COMPLETED" ? new Date() : null,
         },
         update: {
-          nannyNote: body.notes,
+          ...(body.notes ? { nannyNote: body.notes } : {}),
           ...(body.status === "COMPLETED" ? { completedAt: new Date() } : {}),
         },
       });
@@ -1197,7 +1281,7 @@ export class BookingService {
         ) as any,
       },
     });
-    log.info(`Booking ${bookingId} confirmed via payment`);
+    log.info(`Booking ${bookingId} task updated`);
 
     // Fire-and-forget AI trigger — only for subscription bookings (>= 30 days)
     // if (isSubscriptionBooking(booking.scheduledStartTime, booking.scheduledEndTime)) {
@@ -1401,6 +1485,7 @@ export class BookingService {
           },
           orderBy: { createdAt: "desc" },
         },
+        nannyPayment: true,
       },
     });
     if (!booking) throw new AppError("Booking not found", 404);
@@ -1630,6 +1715,7 @@ export class BookingService {
   // ── GET /api/v1/bookings/me/live-status ──────────────────────────────────
   async getUserLiveStatus(userId: string): Promise<{
     bookingId: string;
+    nannyId: string;
     nannyName: string;
     nannyPhoto: string | null;
     clockedInAt: Date;
@@ -1726,6 +1812,7 @@ export class BookingService {
 
     return {
       bookingId: booking.id,
+      nannyId: booking.nanny.id,
       nannyName: booking.nanny.name,
       nannyPhoto: booking.nanny.profilePhoto,
       clockedInAt: attendance.clockInAt!,
@@ -1910,6 +1997,16 @@ export class BookingService {
     const fakeShiftStart = new Date(0);
     const fakeShiftEnd = new Date(storedSessionHours * 3_600_000);
 
+    let extResolvedCoupon: { discountPct: number; label: string } | undefined;
+    if (couponCode) {
+      const { CouponService } = await import("./coupon.service");
+      const couponSvc = new CouponService();
+      const result = await couponSvc.validateCode(couponCode);
+      if (!result.valid)
+        throw new AppError("Invalid or expired coupon code", 400);
+      extResolvedCoupon = { discountPct: result.discountPct!, label: result.label! };
+    }
+
     const pricing = calcPricing({
       serviceType: booking.serviceType,
       hourlyRate: nanny.hourlyRate,
@@ -1919,6 +2016,7 @@ export class BookingService {
       shiftEnd: fakeShiftEnd,
       workingDays: extraDays,
       couponCode: couponCode ?? undefined,
+      resolvedCoupon: extResolvedCoupon,
       goalsFee,
       lunch: lunch === true,
     });

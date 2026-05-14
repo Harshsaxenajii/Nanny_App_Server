@@ -72,6 +72,8 @@ export interface PricingInput {
   /** Actual number of working days in the booking range. Required for range types. */
   workingDays?: number;
   couponCode?: string;
+  /** Pre-resolved coupon from DB — if provided, bypasses the local catalogue. */
+  resolvedCoupon?: { discountPct: number; label: string };
   /** Monthly add-on fee for selected child development goals (not subject to GST). */
   goalsFee?: number;
   /**
@@ -197,6 +199,7 @@ export function calcPricing(input: PricingInput): PricingResult {
     shiftEnd,
     workingDays: inputDays,
     couponCode,
+    resolvedCoupon,
     goalsFee = 0,
     lunch = false,
   } = input;
@@ -247,8 +250,9 @@ export function calcPricing(input: PricingInput): PricingResult {
   let couponLabel: string | null = null;
 
   if (couponCode) {
-    const key   = couponCode.toUpperCase().trim();
-    const entry = COUPON_CATALOGUE[key];
+    const key = couponCode.toUpperCase().trim();
+    // Prefer pre-resolved DB coupon; fall back to local catalogue
+    const entry = resolvedCoupon ?? COUPON_CATALOGUE[key];
     if (entry) {
       discount    = Math.round(baseFee * entry.discountPct);
       appliedCode = key;

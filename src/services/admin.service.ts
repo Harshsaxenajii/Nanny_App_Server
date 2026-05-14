@@ -299,6 +299,52 @@ export class AdminService {
     return updated;
   }
 
+  /* ── GET /api/v1/admin/nannies/:nannyId/payments/monthly ─────────────── */
+  async getNannyMonthlyPayments(nannyId: string, query: any) {
+    const nanny = await prisma.nanny.findUnique({ where: { id: nannyId } });
+    if (!nanny) throw new AppError("Nanny not found", 404);
+
+    const year = parseInt(String(query.year || new Date().getFullYear()), 10);
+    const month = parseInt(String(query.month || new Date().getMonth() + 1), 10);
+
+    const from = new Date(year, month - 1, 1);
+    const to = new Date(year, month, 1);
+
+    const payments = await prisma.nannyPayment.findMany({
+      where: { nannyId, createdAt: { gte: from, lt: to } },
+      orderBy: { createdAt: 'asc' },
+      include: {
+        booking: {
+          select: {
+            id: true,
+            serviceType: true,
+            scheduledStartTime: true,
+            scheduledEndTime: true,
+            children: { select: { name: true } },
+          },
+        },
+      },
+    });
+
+    const totalEarned = payments.reduce((s, p) => s + p.totalAmount, 0);
+    const totalSettled = payments.filter(p => p.status === 'SETTLED').reduce((s, p) => s + p.totalAmount, 0);
+    const pendingBalance = totalEarned - totalSettled;
+
+    return { year, month, nanny: { id: nanny.id, name: nanny.name }, payments, summary: { totalEarned, totalSettled, pendingBalance } };
+  }
+
+  /* ── PATCH /api/v1/admin/nannies/:nannyId/payments/:paymentId/settle ─── */
+  async settleNannyPayment(paymentId: string, adminId: string) {
+    const pay = await prisma.nannyPayment.findUnique({ where: { id: paymentId } });
+    if (!pay) throw new AppError("NannyPayment not found", 404);
+    if (pay.status === 'SETTLED') throw new AppError("Payment is already settled", 400);
+
+    return prisma.nannyPayment.update({
+      where: { id: paymentId },
+      data: { status: 'SETTLED', settledAt: new Date(), settledBy: adminId },
+    });
+  }
+
   /* ── GET /api/v1/admin/audit-logs ────────────────────────────────────── */
   async getAuditLogs(query: any) {
     const { page, limit, skip } = paginate(query);

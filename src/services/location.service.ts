@@ -5,7 +5,7 @@ import { createLogger } from "../utils/logger";
 import { NannyStatus } from "@prisma/client";
 
 const log = createLogger("location");
-const TTL_MS = 5 * 60 * 1000; // 5 minutes
+const TTL_MS = 15 * 60 * 1000; // 15 minutes (nanny pings every 10 min)
 
 export const LIVE_LOCATION_LABEL = "LIVE_LOCATION";
 
@@ -134,7 +134,13 @@ export class LocationService {
     const nanny = await prisma.nanny.findUnique({ where: { userId } });
     if (!nanny) throw new AppError("Nanny profile not found", 404);
 
-    if (!nanny.isActive)
+    // Allow during an active shift even if isActive flag isn't set
+    const hasActiveShift = await prisma.booking.findFirst({
+      where: { nannyId: nanny.id, status: "IN_PROGRESS" },
+      select: { id: true },
+    });
+
+    if (!nanny.isActive && !hasActiveShift)
       throw new AppError("Your nanny account is not active", 403);
 
     store.set(nanny.id, {

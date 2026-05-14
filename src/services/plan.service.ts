@@ -22,6 +22,14 @@ import { GoalCategory, Prisma }   from '@prisma/client';
 const log       = createLogger('plan');
 const aiService = new AiService();
 
+// Returns the UTC Monday of a given ISO week (week 1 = week containing Jan 4)
+function isoWeekStart(year: number, week: number): Date {
+  const jan4      = new Date(Date.UTC(year, 0, 4));
+  const dayOfWeek = jan4.getUTCDay() || 7; // 1=Mon … 7=Sun
+  const week1Mon  = new Date(jan4.getTime() - (dayOfWeek - 1) * 86400000);
+  return new Date(week1Mon.getTime() + (week - 1) * 7 * 86400000);
+}
+
 export class PlanService {
 
   // ── getDailyPlan ────────────────────────────────────────────────────────────
@@ -409,12 +417,12 @@ export class PlanService {
       };
     }
 
-    // Compute overall dayScore from all goal-related tasks that were logged
-    const goalTasksLogged = tasks.filter((t) => t.goalId && t.log !== null);
-    const dayScore = goalTasksLogged.length > 0
+    // dayScore: average of goal-task nannyScores mapped from 1–5 to 0–100
+    const goalTasksWithScore = tasks.filter((t) => t.goalId && t.nannyScore !== null);
+    const dayScore = goalTasksWithScore.length > 0
       ? Math.round(
-          goalTasksLogged.reduce((sum, t) => sum + (t.log!.completionPct || 0), 0) /
-          goalTasksLogged.length,
+          goalTasksWithScore.reduce((sum, t) => sum + ((t.nannyScore! - 1) * 25), 0) /
+          goalTasksWithScore.length,
         )
       : 0;
 
@@ -442,42 +450,42 @@ export class PlanService {
     );
   }
 
-  // ── generateMonthlySummary ──────────────────────────────────────────────────
-  // Called by the monthly cron on the 1st of each month.
-  // Aggregates ChildDevelopmentLog for the previous month → AI narrative
-  // → stored in Children.developmentSummary under key "YYYY-MM".
+  // ── generateWeeklySummary ───────────────────────────────────────────────────
+  // Called by the weekly cron every Monday morning.
+  // Aggregates ChildDevelopmentLog for the completed ISO week → AI narrative
+  // → stored in Children.developmentSummary under key "YYYY-WXX".
+  // Also purges PlanTask records older than 7 days to keep the DB lean.
 
-  async generateMonthlySummary(childId: string, year: number, month: number): Promise<void> {
-    const monthStart = new Date(Date.UTC(year, month - 1, 1));
-    const monthEnd   = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
-    const monthKey   = `${year}-${String(month).padStart(2, '0')}`;
+  async generateWeeklySummary(childId: string, year: number, isoWeek: number): Promise<void> {
+    const weekKey   = `${year}-W${String(isoWeek).padStart(2, '0')}`;
+    const weekStart = isoWeekStart(year, isoWeek);
+    const weekEnd   = new Date(weekStart.getTime() + 7 * 86400000 - 1);
 
-    log.info('generateMonthlySummary: child %s, month %s', childId, monthKey);
+    log.info('generateWeeklySummary: child %s, week %s', childId, weekKey);
 
     const child = await prisma.children.findUnique({
       where:   { id: childId },
       include: {
         developmentLogs: {
-          where: { loggedAt: { gte: monthStart, lte: monthEnd } },
+          where: { loggedAt: { gte: weekStart, lte: weekEnd } },
         },
         childGoals: true,
       },
     });
 
     if (!child || !child.developmentLogs.length) {
-      log.info('generateMonthlySummary: no development logs for child %s in %s — skipping', childId, monthKey);
+      log.info('generateWeeklySummary: no development logs for child %s in %s — skipping', childId, weekKey);
       return;
     }
 
-    // Aggregate by category
     const categoryMap = new Map<string, { progressSum: number; total: number; completed: number; count: number }>();
     for (const entry of child.developmentLogs) {
       const prev = categoryMap.get(entry.category) ?? { progressSum: 0, total: 0, completed: 0, count: 0 };
       categoryMap.set(entry.category, {
         progressSum: prev.progressSum + entry.progressPct,
-        total:       prev.total       + entry.totalTasks,
-        completed:   prev.completed   + entry.completedTasks,
-        count:       prev.count       + 1,
+        total:       prev.total + entry.totalTasks,
+        completed:   prev.completed + entry.completedTasks,
+        count:       prev.count + 1,
       });
     }
 
@@ -490,10 +498,10 @@ export class PlanService {
 
     const childAgeMonths = ageInMonths(child.birthDate);
 
-    const aiSummary = await aiService.generateMonthlySummary({
+    const aiSummary = await aiService.generateWeeklySummary({
       childAgeMonths,
       childGender: child.gender,
-      month:       monthKey,
+      week:        weekKey,
       categoryStats,
       goals: child.childGoals.map((g) => ({
         name:          g.name,
@@ -502,16 +510,45 @@ export class PlanService {
       })),
     });
 
-    // Merge into existing developmentSummary — monthly key wins
     const existing = (child.developmentSummary ?? {}) as Record<string, unknown>;
-    existing[monthKey] = { ...aiSummary, generatedAt: new Date().toISOString() };
+    existing[weekKey] = { ...aiSummary, generatedAt: new Date().toISOString() };
 
     await prisma.children.update({
       where: { id: childId },
       data:  { developmentSummary: existing as unknown as Prisma.InputJsonValue },
     });
 
-    log.info('generateMonthlySummary done: child %s, month %s', childId, monthKey);
+    log.info('generateWeeklySummary done: child %s, week %s', childId, weekKey);
+  }
+
+  // ── purgeStalePlanTasks ──────────────────────────────────────────────────────
+  // Deletes PlanTask records older than 7 days for all active FULL_TIME bookings.
+  // Called by the weekly cron AFTER weekly summaries are saved.
+
+  async purgeStalePlanTasks(): Promise<number> {
+    const cutoff = new Date(Date.now() - 7 * 86400000);
+
+    // Only delete from active bookings — completed bookings keep their history
+    const activeBookingIds = (await prisma.booking.findMany({
+      where:  { serviceType: 'FULL_TIME', status: { in: ['CONFIRMED', 'IN_PROGRESS'] } },
+      select: { id: true },
+    })).map((b) => b.id);
+
+    if (!activeBookingIds.length) return 0;
+
+    const activePlanIds = (await prisma.dailyPlan.findMany({
+      where:  { bookingId: { in: activeBookingIds } },
+      select: { id: true },
+    })).map((p) => p.id);
+
+    if (!activePlanIds.length) return 0;
+
+    const { count } = await prisma.planTask.deleteMany({
+      where: { planId: { in: activePlanIds }, forDate: { lt: cutoff } },
+    });
+
+    log.info('purgeStalePlanTasks: deleted %d tasks older than %s', count, cutoff.toISOString().split('T')[0]);
+    return count;
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
@@ -559,25 +596,28 @@ export class PlanService {
       return { summary: 'No tasks were scheduled yesterday.', dayScore: null };
     }
 
-    // Compute dayScore from goal tasks that have been logged
-    const goalTasksLogged = tasks.filter((t) => t.goalId && t.log !== null);
-    const dayScore = goalTasksLogged.length > 0
+    // dayScore: average of goal-task nannyScores mapped 1–5 → 0–100
+    const goalTasksWithScore = tasks.filter((t) => t.goalId && t.nannyScore !== null);
+    const dayScore = goalTasksWithScore.length > 0
       ? Math.round(
-          goalTasksLogged.reduce((sum, t) => sum + (t.log!.completionPct || 0), 0) /
-          goalTasksLogged.length,
+          goalTasksWithScore.reduce((sum, t) => sum + ((t.nannyScore! - 1) * 25), 0) /
+          goalTasksWithScore.length,
         )
       : null;
 
+    const SCORE_LABELS: Record<number, string> = {
+      1: 'Very Poor', 2: 'Poor', 3: 'Good', 4: 'Very Good', 5: 'Great',
+    };
+
     const summary = tasks.map((t) => {
-      const status = t.log?.completionPct
-        ? `completed ${t.log.completionPct}%`
-        : t.status === 'SKIPPED'
-        ? 'skipped'
-        : 'not logged';
-      const mood = t.log?.moodRating       ? `, mood ${t.log.moodRating}/5`             : '';
-      const eng  = t.log?.engagementRating ? `, engagement ${t.log.engagementRating}/5` : '';
-      const note = t.log?.nannyNote        ? `. Nanny note: "${t.log.nannyNote}"`        : '';
-      return `- "${t.title}" (${t.category}): ${status}${mood}${eng}${note}`;
+      const status = t.status === 'COMPLETED' ? 'completed'
+        : t.status === 'SKIPPED' ? 'skipped'
+        : 'pending';
+      const scoreLabel = t.goalId && t.nannyScore
+        ? ` [nanny score: ${SCORE_LABELS[t.nannyScore]} (${t.nannyScore}/5)]`
+        : '';
+      const note = t.log?.nannyNote ? `. Nanny note: "${t.log.nannyNote}"` : '';
+      return `- "${t.title}" (${t.category}): ${status}${scoreLabel}${note}`;
     }).join('\n');
 
     return { summary, dayScore };

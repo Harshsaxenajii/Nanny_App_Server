@@ -14,12 +14,13 @@
  *   For each: assessYesterday() → generateDailyTasks().
  *   lastGeneratedDate guard prevents double-run if cron fires twice.
  *
- * JOB 3 — 1st of month at 1:30 AM IST (default: 20:00 UTC on 1st)
- *   Finds all children with ChildDevelopmentLog records in the previous month.
- *   Calls generateMonthlySummary() → stores AI narrative in Children.developmentSummary.
+ * JOB 3 — Every Monday at 6 AM IST (default: 00:30 UTC Monday)
+ *   Finds all children with ChildDevelopmentLog records in the completed ISO week (Mon–Sun).
+ *   Calls generateWeeklySummary() → stores AI narrative in Children.developmentSummary.
+ *   Then purges PlanTask records older than 7 days for active bookings.
  *
- * All three jobs are also exported as standalone async functions for manual testing
- * via the plan routes (POST /api/v1/plan/cron/midnight|morning|monthly).
+ * All three jobs are exported as standalone async functions for manual testing
+ * via the plan routes (POST /api/v1/plan/cron/midnight|morning|weekly).
  */
 
 import cron         from 'node-cron';
@@ -133,43 +134,67 @@ export async function runMorningTaskJob() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JOB 3 — 1st of month: generate monthly summary for all active children
+// JOB 3 — Every Monday: generate weekly summary + purge stale PlanTask records
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function runMonthlySummaryJob() {
-  log.info('[monthly] Monthly summary job started');
+export async function runWeeklySummaryJob() {
+  log.info('[weekly] Weekly summary job started');
 
-  const now = new Date();
-  // We're running on the 1st of the CURRENT month → summarise the PREVIOUS month
-  const targetYear  = now.getUTCMonth() === 0 ? now.getUTCFullYear() - 1 : now.getUTCFullYear();
-  const targetMonth = now.getUTCMonth() === 0 ? 12 : now.getUTCMonth(); // 1-based
+  // Running Monday morning → summarise the PREVIOUS ISO week (Mon–Sun)
+  const now      = new Date();
+  const prevWeek = new Date(now.getTime() - 7 * 86400000);
+  const { year, week } = getISOWeek(prevWeek);
 
-  const monthStart = new Date(Date.UTC(targetYear, targetMonth - 1, 1));
-  const monthEnd   = new Date(Date.UTC(targetYear, targetMonth, 0, 23, 59, 59, 999));
+  const weekStart = isoWeekStart(year, week);
+  const weekEnd   = new Date(weekStart.getTime() + 7 * 86400000 - 1);
 
-  // Find distinct child IDs that have development logs in the target month
   const logs = await prisma.childDevelopmentLog.findMany({
-    where:  { loggedAt: { gte: monthStart, lte: monthEnd } },
+    where:  { loggedAt: { gte: weekStart, lte: weekEnd } },
     select: { childId: true },
   });
   const childIds = [...new Set(logs.map((l) => l.childId))];
 
-  log.info('[monthly] Children to summarise: %d (month: %d-%d)', childIds.length, targetYear, targetMonth);
+  log.info('[weekly] Children to summarise: %d (week: %d-W%s)', childIds.length, year, String(week).padStart(2, '0'));
 
   const results = { success: 0, failed: 0 };
 
   for (const childId of childIds) {
     try {
-      await planService.generateMonthlySummary(childId, targetYear, targetMonth);
+      await planService.generateWeeklySummary(childId, year, week);
       results.success++;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      log.error('[monthly] Child %s — failed: %s', childId, message);
+      log.error('[weekly] Child %s — generateWeeklySummary failed: %s', childId, message);
       results.failed++;
     }
   }
 
-  log.info('[monthly] Done — success: %d, failed: %d', results.success, results.failed);
+  // Purge old PlanTask records AFTER summaries are saved
+  try {
+    const deleted = await planService.purgeStalePlanTasks();
+    log.info('[weekly] Purged %d stale PlanTask records', deleted);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error('[weekly] purgeStalePlanTasks failed: %s', message);
+  }
+
+  log.info('[weekly] Done — success: %d, failed: %d', results.success, results.failed);
+}
+
+// ISO week helpers (local — not exported)
+function getISOWeek(date: Date): { year: number; week: number } {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const week      = Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return { year: d.getUTCFullYear(), week };
+}
+
+function isoWeekStart(year: number, week: number): Date {
+  const jan4      = new Date(Date.UTC(year, 0, 4));
+  const dayOfWeek = jan4.getUTCDay() || 7;
+  const week1Mon  = new Date(jan4.getTime() - (dayOfWeek - 1) * 86400000);
+  return new Date(week1Mon.getTime() + (week - 1) * 7 * 86400000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -183,13 +208,13 @@ export function registerDailyPlanJob() {
   // 5:00 AM IST = 23:30 UTC previous day
   const morningSchedule  = process.env.MORNING_TASK_CRON  ?? '30 23 * * *';
 
-  // 1st of month at 1:30 AM IST = 20:00 UTC on 1st of month
-  const monthlySchedule  = process.env.MONTHLY_SUMMARY_CRON ?? '0 20 1 * *';
+  // Every Monday at 6:00 AM IST = 00:30 UTC Monday (summarises completed Mon–Sun week)
+  const weeklySchedule   = process.env.WEEKLY_SUMMARY_CRON ?? '30 0 * * 1';
 
   for (const [name, expr] of [
     ['midnight', midnightSchedule],
     ['morning',  morningSchedule],
-    ['monthly',  monthlySchedule],
+    ['weekly',   weeklySchedule],
   ] as [string, string][]) {
     if (!cron.validate(expr)) {
       throw new Error(`Invalid cron expression for ${name} job: "${expr}"`);
@@ -198,7 +223,7 @@ export function registerDailyPlanJob() {
 
   log.info('Registering midnight plan job  — schedule: %s (UTC)', midnightSchedule);
   log.info('Registering 5am task job       — schedule: %s (UTC)', morningSchedule);
-  log.info('Registering monthly summary job — schedule: %s (UTC)', monthlySchedule);
+  log.info('Registering weekly summary job  — schedule: %s (UTC)', weeklySchedule);
 
   cron.schedule(midnightSchedule, async () => {
     try { await runMidnightPlanJob(); }
@@ -214,10 +239,10 @@ export function registerDailyPlanJob() {
     }
   });
 
-  cron.schedule(monthlySchedule, async () => {
-    try { await runMonthlySummaryJob(); }
+  cron.schedule(weeklySchedule, async () => {
+    try { await runWeeklySummaryJob(); }
     catch (err: unknown) {
-      log.error('[monthly] Unhandled error: %s', err instanceof Error ? err.message : String(err));
+      log.error('[weekly] Unhandled error: %s', err instanceof Error ? err.message : String(err));
     }
   });
 }

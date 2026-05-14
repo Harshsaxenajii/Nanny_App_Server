@@ -98,6 +98,30 @@ export interface AiMonthlySummary {
   recommendations:  string[];
 }
 
+export interface GenerateWeeklyInput {
+  childAgeMonths: number;
+  childGender:    string;
+  week:           string;  // "YYYY-WXX"
+  categoryStats:  {
+    category:       string;
+    avgProgress:    number;
+    totalTasks:     number;
+    completedTasks: number;
+  }[];
+  goals: {
+    name:          string;
+    category:      string;
+    completionPct: number;
+  }[];
+}
+
+export interface AiWeeklySummary {
+  narrative:        string;
+  overallScore:     number;
+  categoryInsights: Record<string, string>;
+  recommendations:  string[];
+}
+
 // Internal types for raw AI JSON shapes
 interface RawAiTask extends Omit<AiTask, 'goalId'> {
   goalIndex: number;  // -1 = ROUTINE task with no goal link
@@ -340,6 +364,65 @@ Return only valid JSON.
 
     const raw    = await this.callGemini(prompt);
     const parsed = this.parseJson<AiMonthlySummary>(raw, 'generateMonthlySummary');
+    return parsed;
+  }
+
+  // ── generateWeeklySummary ───────────────────────────────────────────────────
+  // Called every Monday morning to produce a parent-facing weekly progress report.
+
+  async generateWeeklySummary(input: GenerateWeeklyInput): Promise<AiWeeklySummary> {
+    log.info('generateWeeklySummary: week %s', input.week);
+
+    const categoryLines = input.categoryStats.length
+      ? input.categoryStats
+          .map((c) =>
+            `  ${c.category}: ${c.avgProgress}% avg progress` +
+            ` (${c.completedTasks}/${c.totalTasks} tasks completed)`,
+          )
+          .join('\n')
+      : '  No activity data recorded.';
+
+    const goalLines = input.goals.length
+      ? input.goals
+          .map((g) => `  ${g.name} (${g.category}): ${g.completionPct}% complete`)
+          .join('\n')
+      : '  No goals set.';
+
+    const prompt = `
+You are a child development specialist writing a weekly progress report for parents on a nanny care platform in India.
+Be warm, encouraging, and use simple parent-friendly language.
+
+Your output must be a single valid JSON object. No markdown, no backticks, no explanation.
+Schema:
+{
+  "narrative": string,
+  "overallScore": number,
+  "categoryInsights": { "<CATEGORY_NAME>": string },
+  "recommendations": string[]
+}
+
+Child info:
+- Age: ${input.childAgeMonths} months
+- Gender: ${input.childGender}
+- Week: ${input.week}
+
+Category performance this week:
+${categoryLines}
+
+Goal progress:
+${goalLines}
+
+Rules:
+- narrative: 2-3 warm, encouraging sentences summarising the week for parents.
+- overallScore: 0-100, weighted average of category progress percentages.
+- categoryInsights: one concise, parent-friendly sentence per category that had activity.
+- recommendations: 2-4 specific, actionable suggestions for next week.
+
+Return only valid JSON.
+    `.trim();
+
+    const raw    = await this.callGemini(prompt);
+    const parsed = this.parseJson<AiWeeklySummary>(raw, 'generateWeeklySummary');
     return parsed;
   }
 

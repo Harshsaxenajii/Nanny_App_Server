@@ -6,11 +6,12 @@
  * GET  /api/v1/plan/:bookingId            — get DailyPlan + today's tasks
  * POST /api/v1/plan/cron/midnight         — manually trigger midnight job (testing)
  * POST /api/v1/plan/cron/morning          — manually trigger 5am job (testing)
+ * POST /api/v1/plan/cron/weekly           — manually trigger weekly summary + purge job (testing)
  */
 
 import { Router, Request, Response, NextFunction } from "express";
 import { PlanService }                             from "../services/plan.service";
-import { runMidnightPlanJob, runMorningTaskJob, runMonthlySummaryJob } from "../jobs/dailyPlan.job";
+import { runMidnightPlanJob, runMorningTaskJob, runWeeklySummaryJob } from "../jobs/dailyPlan.job";
 import { auth, roles }                             from "../middlewares/index";
 import { ok }                                      from "../utils/response";
 
@@ -84,15 +85,15 @@ router.post(
   },
 );
 
-// ── Manually trigger monthly summary job (testing only) ──────────────────────
-// Summarises the PREVIOUS month for all children with development logs
+// ── Manually trigger weekly summary + purge job (testing only) ───────────────
+// Summarises the PREVIOUS ISO week for all children; purges stale PlanTask records
 router.post(
-  "/cron/monthly",
+  "/cron/weekly",
   roles("ADMIN", "SUPER_ADMIN"),
   async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      await runMonthlySummaryJob();
-      res.json(ok(null, "Monthly summary job executed"));
+      await runWeeklySummaryJob();
+      res.json(ok(null, "Weekly summary job executed"));
     } catch (e) { next(e); }
   },
 );

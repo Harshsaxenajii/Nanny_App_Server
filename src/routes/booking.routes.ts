@@ -237,9 +237,15 @@ router.patch(
   roles("NANNY"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
+      const { latitude, longitude } = req.body ?? {};
       res.json(
         ok(
-          await service.startBooking(req.params.id, req.user!.userId),
+          await service.startBooking(
+            req.params.id,
+            req.user!.userId,
+            typeof latitude === "number" ? latitude : undefined,
+            typeof longitude === "number" ? longitude : undefined,
+          ),
           "Clocked in successfully",
         ),
       );
@@ -258,9 +264,12 @@ router.patch(
   roles("NANNY"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
+      const { latitude, longitude } = req.body ?? {};
       const result = await service.completeBooking(
         req.params.id,
         req.user!.userId,
+        typeof latitude === "number" ? latitude : undefined,
+        typeof longitude === "number" ? longitude : undefined,
       );
       const msg = result.attendance.isFinalDay
         ? "Engagement completed — great work!"

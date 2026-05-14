@@ -29,7 +29,9 @@ import { errorHandler, notFound } from "./middlewares/index";
 import * as admin from "firebase-admin";
 import { goalRouter } from "./routes/goal.routes";
 import { planRouter } from "./routes/plan.routes";
+import { couponRouter } from "./routes/coupon.routes";
 import { registerDailyPlanJob } from "./jobs/dailyPlan.job";
+import { registerReminderJob } from "./jobs/reminder.job";
 
 const serviceAccount = require("/etc/secrets/service-account.json");
 // const serviceAccount = require("../service-account.json");
@@ -119,22 +121,16 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 /* ── Health check ───────────────────────────────────────────────────────── */
 app.get("/health", async (_req, res) => {
-  const data = await prisma.booking.findUnique({
-    where: {
-      id: "69e202768ff166a3ebbacb12",
-    },
-    include: {
-      childGoals: true,
-      dailyPlan: {
-        include: {
-          tasks: true,
-        },
-      },
-      // requestedDayWiseDailyPlan:true,
-    },
-  });
+  // const data = await prisma.coupon.create(
+  //   {
+  //   data:{
+  //     code:"FIRST10",
+  //     discountPct:0.10,
+  //     label:"First Discount"
+  //   }
+  // })
   res.json({
-    data: data,
+    // data: data,
     status: "ok",
     service: "nanny-app",
     env: config.env,
@@ -154,6 +150,7 @@ app.use("/api/v1/chat", chatRouter);
 app.use("/api/v1/notifications", notificationRouter);
 app.use("/api/v1/admin", adminRouter);
 app.use("/api/v1/goals", goalRouter);
+app.use("/api/v1/coupons", couponRouter);
 
 // PlanRouter API
 app.use("/api/v1/plan", planRouter);
@@ -185,6 +182,7 @@ async function start() {
   // register jobs (AI)
 
   registerDailyPlanJob();
+  registerReminderJob();
 
   httpServer.listen(config.port, () => {
     log.info(`✅ Nanny App running on port ${config.port} [${config.env}]`);

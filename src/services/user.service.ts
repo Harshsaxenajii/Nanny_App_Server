@@ -471,4 +471,166 @@ export class UserService {
       },
     });
   }
+
+  async getDashboard(userId: string) {
+    await findUserOrFail(userId);
+
+    const now = new Date();
+
+    const UPCOMING_STATUSES = [
+      // 'PENDING_NANNY_CONFIRMATION',
+      // 'PENDING_PAYMENT',
+      'CONFIRMED',
+      // 'NANNY_ASSIGNED',
+      'IN_PROGRESS',
+    ];
+
+    const [upcomingBookings, unreadCount, children, completedCount] = await Promise.all([
+      prisma.booking.findMany({
+        where: { userId, status: { in: UPCOMING_STATUSES as any } },
+        orderBy: { scheduledStartTime: 'asc' },
+        take: 2,
+        select: {
+          id: true,
+          status: true,
+          serviceType: true,
+          scheduledStartTime: true,
+          scheduledEndTime: true,
+          totalAmount: true,
+          nanny: { select: { name: true, profilePhoto: true } },
+          children: { select: { name: true } },
+        },
+      }),
+      prisma.notification.count({ where: { userId, isRead: false } }),
+      prisma.children.findMany({ where: { userId }, select: { id: true, name: true, birthDate: true } }),
+      prisma.booking.count({ where: { userId, status: 'COMPLETED' } }),
+    ]);
+
+    // Birthday check: match month + day regardless of year
+    const birthdayChildren = children
+      .filter((c) => {
+        if (!c.birthDate) return false;
+        const bd = new Date(c.birthDate);
+        return bd.getMonth() === now.getMonth() && bd.getDate() === now.getDate();
+      })
+      .map((c) => ({ id: c.id, name: c.name }));
+
+    return {
+      upcomingBookings,
+      hasUnreadNotifications: unreadCount > 0,
+      unreadNotificationCount: unreadCount,
+      birthdayChildren,
+      totalCompletedBookings: completedCount,
+    };
+  }
+
+  async deleteAccount(userId: string) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: { nannyProfile: { select: { id: true } } },
+    });
+    if (!user) throw new AppError("User not found", 404);
+
+    const nannyId = user.nannyProfile?.id ?? null;
+
+    // Collect booking IDs first (needed for cascade deletes)
+    const bookingIds = (
+      await prisma.booking.findMany({ where: { userId }, select: { id: true } })
+    ).map((b) => b.id);
+
+    // Collect daily plan + task IDs for explicit deletion
+    const planIds =
+      bookingIds.length > 0
+        ? (
+            await prisma.dailyPlan.findMany({
+              where: { bookingId: { in: bookingIds } },
+              select: { id: true },
+            })
+          ).map((p) => p.id)
+        : [];
+
+    const taskIds =
+      planIds.length > 0
+        ? (
+            await prisma.planTask.findMany({
+              where: { planId: { in: planIds } },
+              select: { id: true },
+            })
+          ).map((t) => t.id)
+        : [];
+
+    // Chat rooms linked to these bookings
+    const chatRoomIds =
+      bookingIds.length > 0
+        ? (
+            await prisma.chatRoom.findMany({
+              where: { bookingId: { in: bookingIds } },
+              select: { id: true },
+            })
+          ).map((r) => r.id)
+        : [];
+
+    // Delete in dependency order — deepest children first
+    if (taskIds.length > 0)
+      await prisma.taskLog.deleteMany({ where: { taskId: { in: taskIds } } });
+
+    if (nannyId)
+      await prisma.taskLog.deleteMany({ where: { nannyId } });
+
+    if (planIds.length > 0)
+      await prisma.planTask.deleteMany({ where: { planId: { in: planIds } } });
+
+    if (planIds.length > 0)
+      await prisma.dailyPlan.deleteMany({ where: { id: { in: planIds } } });
+
+    if (bookingIds.length > 0) {
+      await prisma.nannyPayment.deleteMany({ where: { bookingId: { in: bookingIds } } });
+      await prisma.attendanceRecord.deleteMany({ where: { bookingId: { in: bookingIds } } });
+      await prisma.bookingExtension.deleteMany({ where: { bookingId: { in: bookingIds } } });
+      await prisma.payment.deleteMany({ where: { bookingId: { in: bookingIds } } });
+    }
+
+    // Chat: messages + participants cascade from ChatRoom (Prisma-level)
+    if (chatRoomIds.length > 0) {
+      await prisma.chatMessage.deleteMany({ where: { roomId: { in: chatRoomIds } } });
+      await prisma.chatParticipant.deleteMany({ where: { roomId: { in: chatRoomIds } } });
+      await prisma.chatRoom.deleteMany({ where: { id: { in: chatRoomIds } } });
+    }
+
+    // RequestedDayWiseDailyPlan + RequestedDailyPlan cascade from Booking (schema-level)
+    // but delete explicitly to be safe
+    if (bookingIds.length > 0) {
+      const rdwdpIds = (
+        await prisma.requestedDayWiseDailyPlan.findMany({
+          where: { bookingId: { in: bookingIds } },
+          select: { id: true },
+        })
+      ).map((r) => r.id);
+      if (rdwdpIds.length > 0) {
+        await prisma.requestedDailyPlan.deleteMany({
+          where: { requestedDayWiseDailyPlanId: { in: rdwdpIds } },
+        });
+        await prisma.requestedDayWiseDailyPlan.deleteMany({
+          where: { id: { in: rdwdpIds } },
+        });
+      }
+      await prisma.booking.deleteMany({ where: { id: { in: bookingIds } } });
+    }
+
+    // User-owned data
+    await prisma.notification.deleteMany({ where: { userId } });
+    await prisma.address.deleteMany({ where: { userId } });
+    await prisma.children.deleteMany({ where: { userId } });
+    await prisma.pushToken.deleteMany({ where: { userId } });
+    await prisma.refreshToken.deleteMany({ where: { userId } });
+    await prisma.otpRecord.deleteMany({ where: { userId } });
+    await prisma.chatParticipant.deleteMany({ where: { userId } });
+
+    if (nannyId)
+      await prisma.nanny.delete({ where: { id: nannyId } });
+
+    await prisma.user.delete({ where: { id: userId } });
+
+    log.info(`[deleteAccount] User ${userId} and all associated data deleted`);
+  }
 }

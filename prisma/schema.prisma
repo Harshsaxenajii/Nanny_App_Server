@@ -124,6 +124,11 @@ enum RequestedPlanStatus {
   COMPLETED
 }
 
+enum NannyPayStatus {
+  CONFIRMED
+  SETTLED
+}
+
 enum DisabilityType {
   CEREBRAL_PALSY
   MUSCULAR_DYSTROPHY
@@ -309,6 +314,7 @@ model Nanny {
   user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   bookings            Booking[]     @relation("NannyBookings")
   taskLogs            TaskLog[]
+  nannyPayments       NannyPayment[]
 
   @@map("nannies")
 }
@@ -444,9 +450,10 @@ model Booking {
   nanny    Nanny?   @relation("NannyBookings", fields: [nannyId], references: [id])
   children Children @relation(fields: [childrenId], references: [id])
 
-  payments   Payment[]
-  extensions BookingExtension[]
-  chatRoom   ChatRoom?
+  payments      Payment[]
+  extensions    BookingExtension[]
+  chatRoom      ChatRoom?
+  nannyPayment  NannyPayment?
 
   // ── Parent-filled: day-wise tasks and goals ───────────────
   // One RequestedDayWiseDailyPlan per calendar date in the booking range.
@@ -774,6 +781,8 @@ model PlanTask {
   ifTooEasy         String?
   ifTooHard         String?
   status            TaskStatus     @default(PENDING)
+  // 1=Very Poor 2=Poor 3=Good 4=Very Good 5=Great — only set for goal-related tasks
+  nannyScore        Int?
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 
@@ -818,4 +827,44 @@ model ReportBug {
   userId      String?
 
   @@map("report_bug")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODEL — NannyPayment
+// ─────────────────────────────────────────────────────────────
+
+model NannyPayment {
+  id          String         @id @default(auto()) @map("_id") @db.ObjectId
+  nannyId     String         @db.ObjectId
+  bookingId   String         @unique @db.ObjectId
+  baseAmount  Float          @default(0)
+  goalsFee    Float          @default(0)
+  lunchFee    Float          @default(0)
+  totalAmount Float          @default(0)
+  status      NannyPayStatus @default(CONFIRMED)
+  settledAt   DateTime?
+  settledBy   String?        @db.ObjectId
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  nanny   Nanny   @relation(fields: [nannyId], references: [id])
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@map("nanny_payments")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODEL — Coupon
+// ─────────────────────────────────────────────────────────────
+
+model Coupon {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  code        String   @unique
+  label       String
+  discountPct Float
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("coupons")
 }

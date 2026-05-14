@@ -84,4 +84,14 @@ router.get('/audit-logs', async (req: Request, res: Response, next: NextFunction
   try { res.json(ok(await admin.getAuditLogs(req.query))); } catch (e) { next(e); }
 });
 
+// GET /api/v1/admin/nannies/:nannyId/payments/monthly?year=&month=
+router.get('/nannies/:nannyId/payments/monthly', async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await admin.getNannyMonthlyPayments(req.params.nannyId, req.query))); } catch (e) { next(e); }
+});
+
+// PATCH /api/v1/admin/nannies/:nannyId/payments/:paymentId/settle
+router.patch('/nannies/:nannyId/payments/:paymentId/settle', async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await admin.settleNannyPayment(req.params.paymentId, req.user!.userId), 'Payment marked as settled')); } catch (e) { next(e); }
+});
+
 export { router as adminRouter };

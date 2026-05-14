@@ -40,6 +40,16 @@ router.get('/me/bookings', auth, roles('NANNY'), async (req: Request, res: Respo
   try { res.json(ok(await service.getMyBookings(req.user!.userId, req.query))); } catch (e) { next(e); }
 });
 
+// GET /api/v1/nannies/me/dashboard  ← must be before /:id wildcard
+router.get('/me/dashboard', auth, roles('NANNY'), async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await service.getNannyDashboard(req.user!.userId))); } catch (e) { next(e); }
+});
+
+// GET /api/v1/nannies/me/earnings
+router.get('/me/earnings', auth, roles('NANNY'), async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await service.getEarnings(req.user!.userId, req.query))); } catch (e) { next(e); }
+});
+
 // GET /api/v1/nannies/:id/busy-slots  ← PUBLIC (must be before /:id)
 router.get('/:id/busy-slots', auth ,async (req: Request, res: Response, next: NextFunction) => {
   try { res.json(ok(await service.getBusySlots(req.params.id))); } catch (e) { next(e); }

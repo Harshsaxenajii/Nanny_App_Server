@@ -119,5 +119,17 @@ router.post('/me/reportBug', async (req: Request, res: Response, next: NextFunct
      try { res.json(ok(await service.reportBug(req.user!.userId, req.body))); } catch (e) { next(e); }
 });
 
+// GET /api/v1/users/me/dashboard
+router.get('/me/dashboard', async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await service.getDashboard(req.user!.userId))); } catch (e) { next(e); }
+});
+
+// DELETE /api/v1/users/me — permanently delete account + all data
+router.delete('/me', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await service.deleteAccount(req.user!.userId);
+    res.json(ok(null, 'Account deleted successfully'));
+  } catch (e) { next(e); }
+});
 
 export { router as userRouter };
