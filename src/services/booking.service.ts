@@ -18,6 +18,7 @@ import {
   HALF_DAY_THRESHOLD_PCT,
   DEFAULT_MONTHLY_WORKING_DAYS,
 } from "../utils/pricing";
+import { json } from "stream/consumers";
 
 // Re-export for any callers that imported these from this module directly
 export { validateCoupon } from "../utils/pricing";
@@ -249,9 +250,9 @@ export class BookingService {
   // ── POST /api/v1/bookings ────────────────────────────────────────────────
   async createBooking(userId: string, body: any) {
     // ── 1. Validate user & basic inputs ─────────────────────────────────────
-    console.log("called booking service createbooking");
+    console.log("called booking service createbooking", JSON.stringify(body));
     const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user) throw new AppError("User not found", 404);
+    if (!user) throw new AppError("User not found", 404)
 
     const start = new Date(body.scheduledStartTime);
     const end = new Date(body.scheduledEndTime);
@@ -312,12 +313,82 @@ export class BookingService {
           400,
         );
 
-      // Check nanny is not already booked for this time slot
+      // Check nanny is not already booked for this time slot.
+      // For range bookings, scheduledStartTime/EndTime span the full engagement
+      // period — compare per-day shift windows so we don't false-positive against
+      // existing slots whose daily hours don't overlap with the new booking.
+      const shiftSrc =
+        isRange && body.dailyStartTime && body.dailyEndTime
+          ? { s: new Date(body.dailyStartTime), e: new Date(body.dailyEndTime) }
+          : { s: start, e: end };
+
+      console.log("[conflict-check] reservedSlots:", JSON.stringify(nanny.reservedSlot, null, 2));
+      console.log(
+        `[conflict-check] requested: ${start.toISOString()} → ${end.toISOString()}` +
+        ` | serviceType=${body.serviceType} isRange=${isRange}` +
+        ` | dailyShift=${shiftSrc.s.toISOString()} → ${shiftSrc.e.toISOString()}`,
+      );
+
       const conflict = ((nanny.reservedSlot as any[]) ?? []).some(
         (slot: any) => {
           const slotStart = new Date(slot.startTime).getTime();
-          const slotEnd = new Date(slot.endTime).getTime();
-          return slotStart < end.getTime() && slotEnd > start.getTime();
+          const slotEnd   = new Date(slot.endTime).getTime();
+
+          if (!isRange) {
+            // For single-session bookings (HOURLY, OVERNIGHT, etc.) only check
+            // slots whose calendar date matches the booking's start date.
+            // Cross-midnight bookings (OVERNIGHT) must not block the next day's slots.
+            const bookingStartDate = new Date(start);
+            bookingStartDate.setUTCHours(0, 0, 0, 0);
+            const slotDate = new Date(slot.startTime);
+            slotDate.setUTCHours(0, 0, 0, 0);
+            if (slotDate.getTime() !== bookingStartDate.getTime()) {
+              console.log(
+                `[conflict-check] SINGLE slot ${slot.startTime}→${slot.endTime}` +
+                ` | different date, skip`,
+              );
+              return false;
+            }
+            const overlaps = slotStart < end.getTime() && slotEnd > start.getTime();
+            console.log(
+              `[conflict-check] SINGLE slot ${slot.startTime}→${slot.endTime}` +
+              ` | overlaps=${overlaps}`,
+            );
+            return overlaps;
+          }
+
+          // Range booking: slot date must fall within the engagement date range,
+          // then compare the daily shift window for that day against the slot.
+          const slotDate = new Date(slot.startTime);
+          slotDate.setUTCHours(0, 0, 0, 0);
+
+          const engStart = new Date(start);
+          engStart.setUTCHours(0, 0, 0, 0);
+
+          const engEnd = new Date(end);
+          engEnd.setUTCHours(0, 0, 0, 0);
+
+          if (slotDate.getTime() < engStart.getTime() || slotDate.getTime() > engEnd.getTime()) {
+            console.log(
+              `[conflict-check] RANGE slot ${slot.startTime}→${slot.endTime}` +
+              ` | date outside engagement range → skip`,
+            );
+            return false;
+          }
+
+          const y = slotDate.getUTCFullYear();
+          const mo = slotDate.getUTCMonth();
+          const d  = slotDate.getUTCDate();
+          const dayShiftStart = new Date(Date.UTC(y, mo, d, shiftSrc.s.getUTCHours(), shiftSrc.s.getUTCMinutes()));
+          const dayShiftEnd   = new Date(Date.UTC(y, mo, d, shiftSrc.e.getUTCHours(), shiftSrc.e.getUTCMinutes()));
+
+          const overlaps = slotStart < dayShiftEnd.getTime() && slotEnd > dayShiftStart.getTime();
+          console.log(
+            `[conflict-check] RANGE slot ${slot.startTime}→${slot.endTime}` +
+            ` | dayShift ${dayShiftStart.toISOString()}→${dayShiftEnd.toISOString()}` +
+            ` | overlaps=${overlaps}`,
+          );
+          return overlaps;
         },
       );
       if (conflict)
