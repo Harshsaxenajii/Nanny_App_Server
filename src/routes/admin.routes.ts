@@ -84,6 +84,18 @@ router.get('/audit-logs', async (req: Request, res: Response, next: NextFunction
   try { res.json(ok(await admin.getAuditLogs(req.query))); } catch (e) { next(e); }
 });
 
+// GET /api/v1/admin/pricing
+router.get('/pricing', async (req: Request, res: Response, next: NextFunction) => {
+  try { res.json(ok(await admin.getPricingConfig())); } catch (e) { next(e); }
+});
+
+// PATCH /api/v1/admin/pricing
+router.patch('/pricing', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json(ok(await admin.updatePricingConfig(req.user!.userId, req.body), 'Pricing updated'));
+  } catch (e) { next(e); }
+});
+
 // GET /api/v1/admin/nannies/:nannyId/payments/monthly?year=&month=
 router.get('/nannies/:nannyId/payments/monthly', async (req: Request, res: Response, next: NextFunction) => {
   try { res.json(ok(await admin.getNannyMonthlyPayments(req.params.nannyId, req.query))); } catch (e) { next(e); }

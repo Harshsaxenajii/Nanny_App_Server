@@ -81,7 +81,7 @@ export function registerEventHandlers(): void {
         ]
           .filter(Boolean)
           .join(", "),
-        price: pricing?.total ? `₹${pricing.total}` : "See app",
+        price: pricing?.nannyEarnings ? `₹${pricing.nannyEarnings}` : "See app",
         duration: `${durationHrs} hrs`,
         startTime: startTimeStr,
         childAge: calcChildAge(booking.children?.birthDate),

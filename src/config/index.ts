@@ -30,5 +30,5 @@ export const config = {
     keySecret:     process.env.RAZORPAY_KEY_SECRET      || '',
     webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET  || '',
   },
-  corsOrigins: (process.env.CORS_ORIGIN || 'http://localhost:3000').split(',').map(s => s.trim()),
+  corsOrigins: (process.env.CORS_ORIGIN || 'http://localhost:3001').split(',').map(s => s.trim()),
 };

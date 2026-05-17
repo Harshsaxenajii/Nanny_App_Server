@@ -302,7 +302,10 @@ export class BookingService {
         throw new AppError("This nanny is currently not available", 400);
       if (!nanny.isActive)
         throw new AppError("This nanny account is not active", 400);
-      if (!nanny.serviceTypes.includes(body.serviceType))
+      // New platform-managed booking types are available to all verified nannies.
+      // Legacy self-reported types (PART_TIME, ONE_TIME, EMERGENCY) are still nanny-specific.
+      const NEW_BOOKING_TYPES = new Set(["HOURLY", "DAILY", "WEEKLY", "FULL_TIME", "OVERNIGHT", "MONTHLY_SUBSCRIPTION"]);
+      if (!NEW_BOOKING_TYPES.has(body.serviceType) && !nanny.serviceTypes.includes(body.serviceType))
         throw new AppError(
           `This nanny does not offer ${body.serviceType}.`,
           400,
@@ -405,7 +408,7 @@ export class BookingService {
     if (body.couponCode) {
       const { CouponService } = await import("./coupon.service");
       const couponSvc = new CouponService();
-      const result = await couponSvc.validateCode(body.couponCode);
+      const result = await couponSvc.validateCode(body.couponCode, userId);
       if (!result.valid)
         throw new AppError("Invalid or expired coupon code", 400);
       resolvedCoupon = { discountPct: result.discountPct!, label: result.label! };
@@ -445,22 +448,36 @@ export class BookingService {
     }
 
     // console.log("tag 4", body.lunch);
-    // ── 7. Calculate pricing ─────────────────────────────────────────────────
-    const pricing = nanny
-      ? calcPricing({
-          serviceType: body.serviceType,
-          hourlyRate: nanny.hourlyRate,
-          dailyRate:
-            nanny.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null,
-          shiftStart,
-          shiftEnd,
-          workingDays: billingWorkingDays,
-          couponCode: body.couponCode ?? undefined,
-          resolvedCoupon,
-          goalsFee,
-          lunch: body.lunch === true,
-        })
-      : null;
+    // ── 7. Fetch live pricing config from DB then calculate pricing ──────────
+    let pricingConfig: any = null;
+    try {
+      pricingConfig = await (prisma as any).pricingConfig.findFirst();
+      if (!pricingConfig) {
+        pricingConfig = await (prisma as any).pricingConfig.create({ data: {} });
+      }
+    } catch {
+      // fallback to defaults if collection not initialised yet
+    }
+
+    const weeklySelectedDays =
+      body.serviceType === "WEEKLY" && Array.isArray(body.workingDays)
+        ? body.workingDays.length
+        : undefined;
+
+    const pricing = calcPricing({
+      serviceType: body.serviceType,
+      hourlyRate: nanny?.hourlyRate ?? pricingConfig?.hourlyRate ?? 199,
+      dailyRate: nanny?.dailyRate && nanny.dailyRate > 0 ? nanny.dailyRate : null,
+      shiftStart,
+      shiftEnd,
+      workingDays: billingWorkingDays,
+      weeklySelectedDays,
+      couponCode: body.couponCode ?? undefined,
+      resolvedCoupon,
+      goalsFee,
+      lunch: body.lunch === true,
+      config: pricingConfig ?? undefined,
+    });
 
     // console.log("you pricies", calcPricing);
 
@@ -498,28 +515,28 @@ export class BookingService {
         addressCountry: addr?.country ?? "IN",
         addressLat: coords ? coords[1] : null,
         addressLng: coords ? coords[0] : null,
-        baseAmount: pricing?.baseFee ?? 0,
-        gstAmount: pricing?.gst ?? 0,
-        totalAmount: pricing?.total ?? 0,
+        baseAmount: pricing.baseFee,
+        gstAmount: pricing.gst,
+        totalAmount: pricing.total,
         status: BookingStatus.PENDING_NANNY_CONFIRMATION,
-        pricingDetails: pricing
-          ? {
-              sessionHours: pricing.sessionHours,
-              workingDays: pricing.workingDays,
-              description: pricing.description,
-              baseFee: pricing.baseFee,
-              emergencySurcharge: pricing.emergencySurcharge,
-              couponCode: pricing.couponCode,
-              couponLabel: pricing.couponLabel,
-              discount: pricing.discount,
-              discountedBase: pricing.discountedBase,
-              platformFee: pricing.platformFee,
-              gst: pricing.gst,
-              goalsFee: pricing.goalsFee,
-              lunchFee: pricing.lunchFee,
-              total: pricing.total,
-            }
-          : null,
+        pricingDetails: {
+          sessionHours: pricing.sessionHours,
+          workingDays: pricing.workingDays,
+          description: pricing.description,
+          baseFee: pricing.baseFee,
+          travelFee: pricing.travelFee,
+          emergencySurcharge: pricing.emergencySurcharge,
+          couponCode: pricing.couponCode,
+          couponLabel: pricing.couponLabel,
+          discount: pricing.discount,
+          discountedBase: pricing.discountedBase,
+          platformFee: pricing.platformFee,
+          gst: pricing.gst,
+          goalsFee: pricing.goalsFee,
+          lunchFee: pricing.lunchFee,
+          total: pricing.total,
+          nannyEarnings: pricing.nannyEarnings,
+        },
         timeline: appendTimeline(
           [],
           BookingStatus.PENDING_NANNY_CONFIRMATION,
@@ -574,6 +591,13 @@ export class BookingService {
           }),
         ),
       );
+    }
+
+    // Record first-time coupon usage so the same user cannot reuse it
+    if (body.couponCode) {
+      const { CouponService } = await import("./coupon.service");
+      const couponSvc = new CouponService();
+      await couponSvc.recordUsage(userId, body.couponCode, booking.id);
     }
 
     // Nanny gets an FCM push to accept or reject
@@ -748,10 +772,10 @@ export class BookingService {
     if (booking.nannyId) {
       try {
         const pricing = (booking.pricingDetails ?? {}) as Record<string, number>;
-        const baseAmount = booking.baseAmount ?? 0;
-        const goalsFee = (pricing.goalsFee ?? 0) * 0.5;
         const lunchFee = pricing.lunchFee ?? 0;
-        const totalAmount = baseAmount + goalsFee + lunchFee;
+        const goalsFee = 0; // nanny goal share is baked into nannyEarnings from calcPricing
+        const totalAmount = pricing.nannyEarnings ?? 0;
+        const baseAmount = totalAmount - lunchFee;
         await prisma.nannyPayment.create({
           data: {
             nannyId: booking.nannyId,
@@ -2072,7 +2096,7 @@ export class BookingService {
     if (couponCode) {
       const { CouponService } = await import("./coupon.service");
       const couponSvc = new CouponService();
-      const result = await couponSvc.validateCode(couponCode);
+      const result = await couponSvc.validateCode(couponCode, userId);
       if (!result.valid)
         throw new AppError("Invalid or expired coupon code", 400);
       extResolvedCoupon = { discountPct: result.discountPct!, label: result.label! };

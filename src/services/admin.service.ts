@@ -368,4 +368,38 @@ export class AdminService {
     ]);
     return paginatedResult(logs, total, page, limit);
   }
+
+  /* ── GET /api/v1/admin/pricing ──────────────────────────────────────────── */
+  async getPricingConfig() {
+    let config = await (prisma as any).pricingConfig.findFirst();
+    if (!config) {
+      config = await (prisma as any).pricingConfig.create({ data: {} });
+    }
+    return config;
+  }
+
+  /* ── PATCH /api/v1/admin/pricing ────────────────────────────────────────── */
+  async updatePricingConfig(adminId: string, updates: Record<string, any>) {
+    const allowed = [
+      "hourlyRate", "travelFee", "dailyRate", "weeklyRate",
+      "weeklyExtraDayRate", "monthlyRate", "overnightRate",
+      "subscriptionRate", "subscriptionFee", "lunchFeePerDay",
+      "platformFeePct", "gstPct",
+      "nannySharePct", "nannyGoalSharePct",
+    ];
+
+    const safe: Record<string, any> = {};
+    for (const key of allowed) {
+      if (key in updates) safe[key] = updates[key];
+    }
+
+    let config = await (prisma as any).pricingConfig.findFirst();
+    if (!config) {
+      return (prisma as any).pricingConfig.create({ data: { ...safe, updatedBy: adminId } });
+    }
+    return (prisma as any).pricingConfig.update({
+      where: { id: config.id },
+      data:  { ...safe, updatedBy: adminId },
+    });
+  }
 }

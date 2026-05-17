@@ -139,6 +139,15 @@ app.get("/health", async (_req, res) => {
 });
 
 /* ── API Routes ─────────────────────────────────────────────────────────── */
+// Public pricing config endpoint (no auth needed — read-only)
+app.get("/api/v1/pricing", async (_req, res, next) => {
+  try {
+    let config = await (prisma as any).pricingConfig.findFirst();
+    if (!config) config = await (prisma as any).pricingConfig.create({ data: {} });
+    res.json({ success: true, data: config });
+  } catch (e) { next(e); }
+});
+
 // app.use('/api/v1/pushData', seedRouter);
 app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/users", userRouter);

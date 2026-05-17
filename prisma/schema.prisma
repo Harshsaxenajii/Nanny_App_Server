@@ -52,6 +52,8 @@ enum BookingStatus {
 
 enum ServiceType {
   HOURLY
+  DAILY
+  WEEKLY
   PART_TIME
   FULL_TIME
   MONTHLY_SUBSCRIPTION
@@ -858,13 +860,78 @@ model NannyPayment {
 // ─────────────────────────────────────────────────────────────
 
 model Coupon {
-  id          String   @id @default(auto()) @map("_id") @db.ObjectId
-  code        String   @unique
-  label       String
-  discountPct Float
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+  code            String   @unique
+  label           String
+  discountPct     Float
+  isActive        Boolean  @default(true)
+  isFirstTimeOnly Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@map("coupons")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODEL — CouponUsage
+// Tracks per-user usage for first-time-only coupons.
+// ─────────────────────────────────────────────────────────────
+model CouponUsage {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String   @db.ObjectId
+  couponId   String   @db.ObjectId
+  couponCode String
+  bookingId  String?  @db.ObjectId
+  usedAt     DateTime @default(now())
+
+  @@index([userId, couponId])
+  @@map("coupon_usages")
+}
+
+// ─────────────────────────────────────────────────────────────
+// MODEL — PricingConfig (singleton — only one record exists)
+//
+// Stores all pricing variables for every booking type.
+// Fetched at booking creation time so the frontend price and
+// backend price always agree. Admin can update via the panel.
+// ─────────────────────────────────────────────────────────────
+model PricingConfig {
+  id                String   @id @default(auto()) @map("_id") @db.ObjectId
+
+  // Hourly booking
+  hourlyRate        Int      @default(199)   // ₹/hr
+  travelFee         Int      @default(200)   // flat ₹, Hourly only
+
+  // Daily booking (9-hr fixed shift)
+  dailyRate         Int      @default(1799)  // ₹ flat
+
+  // Weekly booking (5-day base Mon-Fri)
+  weeklyRate        Int      @default(8999)  // ₹ base (5 days)
+  weeklyExtraDayRate Int     @default(1799)  // ₹ per extra day beyond 5
+
+  // Full Time (non-membership, 26 working days/month)
+  monthlyRate       Int      @default(44999) // ₹ flat/month
+
+  // Overnight (9pm-9am, 12 hrs)
+  overnightRate     Int      @default(2399)  // ₹ flat
+
+  // Full Time Membership / Subscription (11-month contract)
+  subscriptionRate  Int      @default(49999) // ₹/month
+  subscriptionFee   Int      @default(5000)  // one-time signup fee
+
+  // Add-ons
+  lunchFeePerDay    Int      @default(100)   // ₹/working day, Full Time
+
+  // Tax & platform (0 = free, displayed to user)
+  platformFeePct    Float    @default(0)     // e.g. 0.05 = 5%
+  gstPct            Float    @default(0)     // e.g. 0.05 = 5%
+
+  // Nanny payout share (admin-configurable)
+  nannySharePct     Float    @default(0.70)  // 70% of baseFee goes to nanny
+  nannyGoalSharePct Float    @default(0.40)  // 40% of goalsFee goes to nanny (membership only)
+
+  updatedAt         DateTime @updatedAt
+  updatedBy         String?  @db.ObjectId
+
+  @@map("pricing_config")
 }

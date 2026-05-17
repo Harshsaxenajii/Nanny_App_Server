@@ -113,11 +113,8 @@ export const S = {
     serviceTypes: Joi.array()
       .items(
         Joi.string().valid(
-          "FULL_TIME",
-          "PART_TIME",
-          "ONE_TIME",
-          "OVERNIGHT",
-          "EMERGENCY",
+          "HOURLY", "DAILY", "WEEKLY", "FULL_TIME", "OVERNIGHT", "MONTHLY_SUBSCRIPTION",
+          "PART_TIME", "ONE_TIME", "EMERGENCY", // legacy
         ),
       )
       .min(1)
@@ -160,7 +157,12 @@ export const S = {
   createBooking: Joi.object({
     nannyId: oid(),
     serviceType: Joi.string()
-      .valid("FULL_TIME", "PART_TIME", "ONE_TIME", "OVERNIGHT", "EMERGENCY")
+      .valid(
+        // Current booking types
+        "HOURLY", "DAILY", "WEEKLY", "FULL_TIME", "OVERNIGHT", "MONTHLY_SUBSCRIPTION",
+        // Legacy types (kept for historical data)
+        "PART_TIME", "ONE_TIME", "EMERGENCY",
+      )
       .required(),
     scheduledStartTime: Joi.string().isoDate().required(),
     scheduledEndTime: Joi.string().isoDate().required(),
@@ -187,9 +189,8 @@ export const S = {
       )
       .when("serviceType", {
         is: Joi.string().valid(
-          "FULL_TIME",
-          "PART_TIME",
-          "MONTHLY_SUBSCRIPTION",
+          "FULL_TIME", "WEEKLY", "MONTHLY_SUBSCRIPTION",
+          "PART_TIME", // legacy
         ),
         then: Joi.required(),
         otherwise: Joi.optional().default([]),
@@ -199,9 +200,8 @@ export const S = {
       .isoDate()
       .when("serviceType", {
         is: Joi.string().valid(
-          "FULL_TIME",
-          "PART_TIME",
-          "MONTHLY_SUBSCRIPTION",
+          "FULL_TIME", "WEEKLY", "MONTHLY_SUBSCRIPTION",
+          "PART_TIME", // legacy
         ),
         then: Joi.required(),
         otherwise: Joi.optional(),
@@ -211,9 +211,8 @@ export const S = {
       .isoDate()
       .when("serviceType", {
         is: Joi.string().valid(
-          "FULL_TIME",
-          "PART_TIME",
-          "MONTHLY_SUBSCRIPTION",
+          "FULL_TIME", "WEEKLY", "MONTHLY_SUBSCRIPTION",
+          "PART_TIME", // legacy
         ),
         then: Joi.required(),
         otherwise: Joi.optional(),
